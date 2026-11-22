@@ -1,0 +1,752 @@
+let mapInstance = null;
+let markerLayer = null;
+let categoryChart = null;
+let eventSource = null;
+let isStreamPaused = false;
+let seenEventIds = new Set();
+let latestData = null;
+let searchQuery = "";
+
+const MAX_SEEN_EVENT_IDS = 50000;
+const ALLOWED_BADGE_CLASSES = new Set([
+  "badge-danger",
+  "badge-purple",
+  "badge-warning",
+  "badge-info",
+  "badge-success",
+]);
+
+function readStoredLang() {
+  try {
+    const saved = localStorage.getItem("honeypot_lang");
+    return saved === "en" ? "en" : "ja";
+  } catch (_) {
+    return "ja";
+  }
+}
+
+function writeStoredLang(lang) {
+  try {
+    localStorage.setItem("honeypot_lang", lang);
+  } catch (_) {
+    // ストレージ利用不可時は無視
+  }
+}
+
+let currentLang = readStoredLang();
+
+const I18N = {
+  ja: {
+    nav_dashboard: "ダッシュボード",
+    nav_env: "開発環境・構成",
+    back_to_dash: "← ダッシュボードへ戻る",
+    period_label: "集計期間:",
+    period_6h: "直近 6時間",
+    period_24h: "直近 24時間",
+    period_72h: "直近 3日間",
+    period_168h: "直近 7日間",
+    pause_btn: "一時停止",
+    resume_btn: "再開",
+    refresh_btn: "即時取得",
+    connecting: "ストリーム接続中...",
+    fetch_error: "取得エラー",
+    kpi_total: "総検知イベント数",
+    kpi_total_sub: "リアルタイム集計中",
+    kpi_ips: "攻撃元ユニークIP",
+    kpi_anomaly: "高異常度アラート (≥75%)",
+    kpi_anomaly_sub: "Isolation Forest 異常検知",
+    kpi_cost: "GCP 月間推定コスト",
+    map_title: "攻撃元ジオロケーションマップ",
+    map_sub: "ip-api.com バッチ解決",
+    chart_title: "ML 攻撃カテゴリ分布",
+    country_rank_title: "国別攻撃ランキング (Top 10)",
+    ip_rank_title: "攻撃元 IP / ISP ランキング (Top 10)",
+    th_rank: "順位",
+    th_country: "国・地域",
+    th_count: "検知数",
+    th_ip: "IPアドレス",
+    th_isp: "ISP / 組織",
+    th_tactic: "主な手口",
+    th_times: "回数",
+    stream_title: "リアルタイム攻撃検知ストリーム（学習・検証用フル表示）",
+    search_placeholder: "IP・国・ISP・ペイロードで検索（例: 102.23.149.169）",
+    clear_btn: "クリア",
+    sse_note: "SSE プッシュ配信（3秒間隔）",
+    th_time: "時刻 (UTC)",
+    th_source: "攻撃元",
+    th_ml: "ML分類",
+    th_anomaly: "AI異常度",
+    th_payload: "リクエスト / ペイロード詳細",
+    countries_observed: (n) => `${n} ヶ国から観測`,
+    quota_label: (pct) => `Logging無料枠消化率: ${pct}%`,
+    updated_label: (t) => `リアルタイム受信: ${t}`,
+    filtered_label: (shown, total) => `表示中: ${shown} / ${total} 件`,
+    all_label: (total) => `全 ${total} 件`,
+    ip_row_title: "クリックでこのIPをストリーム検索",
+    popup_ip: "IP",
+    popup_isp: "ISP",
+    popup_count: "検知数",
+    popup_tactic: "手口",
+    unit_count: "件",
+  },
+  en: {
+    nav_dashboard: "Dashboard",
+    nav_env: "Dev Env & Stack",
+    back_to_dash: "← Back to Dashboard",
+    period_label: "Window:",
+    period_6h: "Last 6 Hours",
+    period_24h: "Last 24 Hours",
+    period_72h: "Last 3 Days",
+    period_168h: "Last 7 Days",
+    pause_btn: "Pause",
+    resume_btn: "Resume",
+    refresh_btn: "Refresh Now",
+    connecting: "Connecting stream...",
+    fetch_error: "Fetch error",
+    kpi_total: "Total Detected Events",
+    kpi_total_sub: "Streaming live",
+    kpi_ips: "Unique Source IPs",
+    kpi_anomaly: "High Anomaly Alerts (≥75%)",
+    kpi_anomaly_sub: "Isolation Forest detection",
+    kpi_cost: "Est. Monthly GCP Cost",
+    map_title: "Source Geolocation Map",
+    map_sub: "ip-api.com batch lookup",
+    chart_title: "ML Attack Categories",
+    country_rank_title: "Top Countries (Top 10)",
+    ip_rank_title: "Top Source IPs / ISPs (Top 10)",
+    th_rank: "Rank",
+    th_country: "Country / Region",
+    th_count: "Events",
+    th_ip: "IP Address",
+    th_isp: "ISP / Organization",
+    th_tactic: "Top Tactic",
+    th_times: "Hits",
+    stream_title: "Live Attack Detection Stream (Full Log View)",
+    search_placeholder: "Filter by IP, country, ISP, or payload (e.g. 102.23.149.169)",
+    clear_btn: "Clear",
+    sse_note: "SSE push stream (3s interval)",
+    th_time: "Time (UTC)",
+    th_source: "Source",
+    th_ml: "ML Class",
+    th_anomaly: "Anomaly",
+    th_payload: "Request / Payload Details",
+    countries_observed: (n) => `Observed across ${n} ${n === 1 ? "country" : "countries"}`,
+    quota_label: (pct) => `Logging free tier usage: ${pct}%`,
+    updated_label: (t) => `Live update: ${t}`,
+    filtered_label: (shown, total) => `Showing: ${shown} / ${total}`,
+    all_label: (total) => `Total: ${total}`,
+    ip_row_title: "Click to filter stream by this IP",
+    popup_ip: "IP",
+    popup_isp: "ISP",
+    popup_count: "Events",
+    popup_tactic: "Tactic",
+    unit_count: "",
+  },
+};
+
+function t(key) {
+  return I18N[currentLang]?.[key] ?? I18N.ja[key] ?? key;
+}
+
+function toSafeText(val, fallback = "") {
+  if (val === null || val === undefined) return fallback;
+  return String(val);
+}
+
+function createTextEl(tagName, text, className = "") {
+  const el = document.createElement(tagName);
+  if (className) {
+    el.className = className;
+  }
+  el.textContent = toSafeText(text);
+  return el;
+}
+
+function getSafeBadgeClass(candidate) {
+  return ALLOWED_BADGE_CLASSES.has(candidate) ? candidate : "badge-info";
+}
+
+function getCategoryBadgeClass(category) {
+  const cat = toSafeText(category);
+  if (cat.includes("RCE")) return getSafeBadgeClass("badge-danger");
+  if (cat.includes("Credential")) return getSafeBadgeClass("badge-purple");
+  if (cat.includes("SQLi") || cat.includes("XSS")) return getSafeBadgeClass("badge-warning");
+  if (cat.includes("Brute")) return getSafeBadgeClass("badge-info");
+  return getSafeBadgeClass("badge-success");
+}
+
+function getAnomalyBadgeClass(score) {
+  const num = Number(score);
+  if (Number.isFinite(num) && num >= 80) return getSafeBadgeClass("badge-danger");
+  if (Number.isFinite(num) && num >= 60) return getSafeBadgeClass("badge-warning");
+  return getSafeBadgeClass("badge-info");
+}
+
+function applyLanguage(lang) {
+  currentLang = lang === "en" ? "en" : "ja";
+  writeStoredLang(currentLang);
+  document.documentElement.lang = currentLang;
+
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    const k = el.getAttribute("data-i18n");
+    const val = t(k);
+    if (typeof val === "string") {
+      el.textContent = val;
+    }
+  });
+
+  const searchInput = document.getElementById("ip-search-input");
+  if (searchInput) {
+    searchInput.placeholder = t("search_placeholder");
+  }
+
+  const toggleBtn = document.getElementById("toggle-stream-btn");
+  if (toggleBtn) {
+    toggleBtn.textContent = isStreamPaused ? t("resume_btn") : t("pause_btn");
+  }
+
+  const jaBtn = document.getElementById("lang-ja-btn");
+  const enBtn = document.getElementById("lang-en-btn");
+  if (jaBtn && enBtn) {
+    jaBtn.classList.toggle("active", currentLang === "ja");
+    enBtn.classList.toggle("active", currentLang === "en");
+  }
+
+  const envJa = document.getElementById("env-content-ja");
+  const envEn = document.getElementById("env-content-en");
+  if (envJa && envEn) {
+    envJa.style.display = currentLang === "ja" ? "flex" : "none";
+    envEn.style.display = currentLang === "en" ? "flex" : "none";
+  }
+
+  if (latestData) {
+    applyDashboardData(latestData);
+  }
+}
+
+function initMap() {
+  const mapEl = document.getElementById("attack-map");
+  if (!mapEl || typeof L === "undefined") return;
+
+  mapInstance = L.map("attack-map", {
+    center: [25, 15],
+    zoom: 2,
+    worldCopyJump: true,
+  });
+
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors",
+    maxZoom: 19,
+  }).addTo(mapInstance);
+
+  markerLayer = L.layerGroup().addTo(mapInstance);
+}
+
+function buildPopupElement(pt) {
+  const container = document.createElement("div");
+  container.style.color = "#0f172a";
+  container.style.fontSize = "13px";
+  container.style.lineHeight = "1.4";
+
+  const titleEl = document.createElement("strong");
+  titleEl.textContent = `${toSafeText(pt.flag, "🌐")} ${toSafeText(pt.country, "Unknown")}`;
+  container.appendChild(titleEl);
+  container.appendChild(document.createElement("br"));
+
+  const ipLabel = document.createTextNode(`${t("popup_ip")}: `);
+  const ipCode = createTextEl("code", toSafeText(pt.ip));
+  container.appendChild(ipLabel);
+  container.appendChild(ipCode);
+  container.appendChild(document.createElement("br"));
+
+  const ispLine = document.createTextNode(`${t("popup_isp")}: ${toSafeText(pt.isp)}`);
+  container.appendChild(ispLine);
+  container.appendChild(document.createElement("br"));
+
+  const countNum = Number(pt.count);
+  const safeCount = Number.isFinite(countNum) && countNum >= 0 ? countNum : 0;
+  const unit = t("unit_count");
+  const countLabel = document.createTextNode(`${t("popup_count")}: `);
+  const countStrong = createTextEl(
+    "strong",
+    `${safeCount}${unit ? " " + unit : ""}`
+  );
+  container.appendChild(countLabel);
+  container.appendChild(countStrong);
+  container.appendChild(document.createElement("br"));
+
+  const tacticLine = document.createTextNode(
+    `${t("popup_tactic")}: ${toSafeText(pt.category)}`
+  );
+  container.appendChild(tacticLine);
+
+  return container;
+}
+
+function updateMarkers(points) {
+  if (!markerLayer) return;
+  markerLayer.clearLayers();
+
+  if (!Array.isArray(points)) return;
+
+  points.forEach((pt) => {
+    if (!pt || typeof pt !== "object") return;
+    const lat = Number(pt.lat);
+    const lon = Number(pt.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+    const countNum = Number(pt.count);
+    const safeCount = Number.isFinite(countNum) && countNum >= 0 ? countNum : 1;
+    const radius = Math.min(22, 6 + safeCount * 2);
+
+    const marker = L.circleMarker([lat, lon], {
+      radius,
+      fillColor: "#f43f5e",
+      color: "#fda4af",
+      weight: 1.5,
+      opacity: 0.9,
+      fillOpacity: 0.55,
+    });
+
+    marker.bindPopup(buildPopupElement(pt));
+    marker.addTo(markerLayer);
+  });
+}
+
+function updateCategoryChart(categories) {
+  const canvas = document.getElementById("category-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const safeCategories =
+    categories && typeof categories === "object" ? categories : {};
+  const ctx = canvas.getContext("2d");
+  const labels = Object.keys(safeCategories).map((k) => toSafeText(k));
+  const values = Object.values(safeCategories).map((v) => {
+    const num = Number(v);
+    return Number.isFinite(num) && num >= 0 ? num : 0;
+  });
+  const palette = ["#f43f5e", "#a855f7", "#f59e0b", "#38bdf8", "#10b981", "#64748b"];
+
+  if (categoryChart) {
+    categoryChart.data.labels = labels;
+    categoryChart.data.datasets[0].data = values;
+    categoryChart.data.datasets[0].backgroundColor = palette.slice(0, labels.length);
+    categoryChart.update("none");
+    return;
+  }
+
+  categoryChart = new Chart(ctx, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [
+        {
+          data: values,
+          backgroundColor: palette.slice(0, labels.length),
+          borderColor: "#131a2a",
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            color: "#e6edf7",
+            boxWidth: 12,
+            padding: 14,
+            font: { size: 12 },
+          },
+        },
+      },
+    },
+  });
+}
+
+function getFilteredTimeline(timeline) {
+  if (!Array.isArray(timeline)) return [];
+  const q = searchQuery.trim().toLowerCase();
+  if (!q) return timeline;
+
+  return timeline.filter((ev) => {
+    if (!ev || typeof ev !== "object") return false;
+    const haystack = [
+      ev.ip,
+      ev.country,
+      ev.isp,
+      ev.category,
+      ev.method,
+      ev.path,
+      ev.payload,
+      ev.timestamp,
+    ]
+      .filter((v) => v !== null && v !== undefined)
+      .map((v) => String(v))
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+function renderCountryTable(topCountries) {
+  const countryBody = document.getElementById("country-table-body");
+  if (!countryBody) return;
+
+  countryBody.textContent = "";
+  const items = Array.isArray(topCountries) ? topCountries : [];
+
+  items.forEach((item, idx) => {
+    if (!item || typeof item !== "object") return;
+    const tr = document.createElement("tr");
+
+    const tdRank = createTextEl("td", `#${idx + 1}`);
+    const tdCountry = createTextEl(
+      "td",
+      `${toSafeText(item.flag, "🌐")} ${toSafeText(item.country, "Unknown")}`
+    );
+
+    const tdCount = document.createElement("td");
+    tdCount.className = "num";
+    const countNum = Number(item.count);
+    tdCount.appendChild(
+      createTextEl("strong", Number.isFinite(countNum) ? countNum.toLocaleString() : "0")
+    );
+
+    tr.appendChild(tdRank);
+    tr.appendChild(tdCountry);
+    tr.appendChild(tdCount);
+    countryBody.appendChild(tr);
+  });
+}
+
+function renderIpTable(topIps) {
+  const ipBody = document.getElementById("ip-table-body");
+  if (!ipBody) return;
+
+  ipBody.textContent = "";
+  const items = Array.isArray(topIps) ? topIps : [];
+
+  items.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const ipStr = toSafeText(item.ip);
+    const tr = document.createElement("tr");
+    tr.className = "clickable-ip-row";
+    tr.title = t("ip_row_title");
+
+    const tdIp = document.createElement("td");
+    tdIp.appendChild(createTextEl("code", ipStr));
+
+    const tdCountry = createTextEl(
+      "td",
+      `${toSafeText(item.flag, "🌐")} ${toSafeText(item.country, "Unknown")}`
+    );
+    const tdIsp = createTextEl("td", toSafeText(item.isp, "Unknown ISP"));
+
+    const tdTactic = document.createElement("td");
+    const tacticStr = toSafeText(item.top_category, "Unknown");
+    tdTactic.appendChild(
+      createTextEl("span", tacticStr, `badge ${getCategoryBadgeClass(tacticStr)}`)
+    );
+
+    const tdCount = document.createElement("td");
+    tdCount.className = "num";
+    const countNum = Number(item.count);
+    tdCount.appendChild(
+      createTextEl("strong", Number.isFinite(countNum) ? countNum.toLocaleString() : "0")
+    );
+
+    tr.addEventListener("click", () => {
+      const input = document.getElementById("ip-search-input");
+      if (input) input.value = ipStr;
+      searchQuery = ipStr;
+      if (latestData) renderTables(latestData);
+    });
+
+    tr.appendChild(tdIp);
+    tr.appendChild(tdCountry);
+    tr.appendChild(tdIsp);
+    tr.appendChild(tdTactic);
+    tr.appendChild(tdCount);
+    ipBody.appendChild(tr);
+  });
+}
+
+function renderTimelineTable(timeline) {
+  const timelineBody = document.getElementById("timeline-table-body");
+  const filterCountEl = document.getElementById("filter-count");
+  if (!timelineBody) return;
+
+  const fullList = Array.isArray(timeline) ? timeline : [];
+  const filtered = getFilteredTimeline(fullList);
+
+  if (filterCountEl) {
+    filterCountEl.textContent = searchQuery.trim()
+      ? I18N[currentLang].filtered_label(filtered.length, fullList.length)
+      : I18N[currentLang].all_label(fullList.length);
+  }
+
+  const nextSeen = new Set();
+  const trackNew = seenEventIds.size > 0;
+  timelineBody.textContent = "";
+
+  filtered.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const tsStr = toSafeText(ev.timestamp);
+    const ipStr = toSafeText(ev.ip);
+    const pathStr = toSafeText(ev.path, "/");
+    const methodStr = toSafeText(ev.method, "GET");
+    const payloadStr = toSafeText(ev.payload);
+    const categoryStr = toSafeText(ev.category, "Unknown");
+    const scoreNum = Number(ev.anomaly_score);
+    const safeScore = Number.isFinite(scoreNum) ? scoreNum : 0;
+
+    const evId = toSafeText(ev.id) || `${tsStr}_${ipStr}_${pathStr}`;
+    if (nextSeen.size < MAX_SEEN_EVENT_IDS) {
+      nextSeen.add(evId);
+    }
+
+    const isNew = trackNew && !seenEventIds.has(evId);
+    const timeShort = tsStr.replace("T", " ").slice(0, 19);
+    const reqPreview = `${methodStr} ${pathStr}${payloadStr ? " | " + payloadStr : ""}`;
+
+    const tr = document.createElement("tr");
+    if (isNew) {
+      tr.className = "new-event-row";
+    }
+
+    const tdTime = document.createElement("td");
+    tdTime.appendChild(createTextEl("code", timeShort));
+
+    const tdSource = document.createElement("td");
+    tdSource.appendChild(
+      document.createTextNode(`${toSafeText(ev.flag, "🌐")} `)
+    );
+    tdSource.appendChild(createTextEl("code", ipStr));
+    tdSource.appendChild(document.createElement("br"));
+    tdSource.appendChild(createTextEl("span", toSafeText(ev.isp, "Unknown ISP"), "muted"));
+
+    const tdMl = document.createElement("td");
+    tdMl.appendChild(
+      createTextEl("span", categoryStr, `badge ${getCategoryBadgeClass(categoryStr)}`)
+    );
+
+    const tdAnomaly = document.createElement("td");
+    tdAnomaly.appendChild(
+      createTextEl("span", `${safeScore}%`, `badge ${getAnomalyBadgeClass(safeScore)}`)
+    );
+
+    const tdPayload = document.createElement("td");
+    tdPayload.appendChild(createTextEl("code", reqPreview));
+
+    tr.appendChild(tdTime);
+    tr.appendChild(tdSource);
+    tr.appendChild(tdMl);
+    tr.appendChild(tdAnomaly);
+    tr.appendChild(tdPayload);
+    timelineBody.appendChild(tr);
+  });
+
+  seenEventIds = nextSeen;
+}
+
+function renderTables(data) {
+  if (!data || typeof data !== "object") return;
+  renderCountryTable(data.top_countries);
+  renderIpTable(data.top_ips);
+  renderTimelineTable(data.timeline);
+}
+
+function applyDashboardData(data) {
+  if (!data || typeof data !== "object") return;
+  latestData = data;
+  if (!document.getElementById("kpi-total")) return;
+
+  const modeBadge = document.getElementById("mode-badge");
+  if (modeBadge) {
+    if (data.is_demo_mode) {
+      modeBadge.textContent = "DEMO FALLBACK";
+      modeBadge.className = "badge badge-warning";
+    } else {
+      modeBadge.textContent = "GCP LIVE";
+      modeBadge.className = "badge badge-success";
+    }
+  }
+
+  const summary = data.summary && typeof data.summary === "object" ? data.summary : {};
+  const cost = data.cost && typeof data.cost === "object" ? data.cost : {};
+
+  const totalAttacks = Number(summary.total_attacks) || 0;
+  const uniqueIps = Number(summary.unique_ips) || 0;
+  const uniqueCountries = Number(summary.unique_countries) || 0;
+  const highAnomaly = Number(summary.high_anomaly_count) || 0;
+  const estUsd = Number(cost.estimated_monthly_usd) || 0;
+  const estJpy = Number(cost.estimated_monthly_jpy) || 0;
+  const quotaPct = Number(cost.logging_free_tier_pct) || 0;
+
+  document.getElementById("kpi-total").textContent = totalAttacks.toLocaleString();
+  document.getElementById("kpi-ips").textContent = uniqueIps.toLocaleString();
+  document.getElementById("kpi-countries-sub").textContent =
+    I18N[currentLang].countries_observed(uniqueCountries);
+  document.getElementById("kpi-anomaly").textContent = highAnomaly.toLocaleString();
+  document.getElementById("kpi-cost").textContent =
+    `$${estUsd.toFixed(2)} (¥${Math.round(estJpy).toLocaleString()})`;
+  document.getElementById("kpi-quota").textContent =
+    I18N[currentLang].quota_label(quotaPct);
+
+  updateMarkers(data.map_points);
+  updateCategoryChart(data.categories);
+  renderTables(data);
+
+  const lastUpdated = document.getElementById("last-updated");
+  if (lastUpdated) {
+    const nowStr = new Date().toLocaleTimeString(
+      currentLang === "en" ? "en-US" : "ja-JP"
+    );
+    lastUpdated.textContent = I18N[currentLang].updated_label(nowStr);
+  }
+}
+
+async function fetchOnce() {
+  const hoursEl = document.getElementById("hours-select");
+  if (!hoursEl) return;
+  const hours = Number(hoursEl.value) || 24;
+  try {
+    const res = await fetch(`/api/stats?hours=${encodeURIComponent(hours)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    applyDashboardData(data);
+  } catch (err) {
+    console.error("Failed to fetch stats:", err);
+    const lastUpdated = document.getElementById("last-updated");
+    if (lastUpdated) lastUpdated.textContent = t("fetch_error");
+  }
+}
+
+function connectStream() {
+  disconnectStream();
+  if (isStreamPaused) return;
+
+  const hoursEl = document.getElementById("hours-select");
+  if (!hoursEl) return;
+  const hours = Number(hoursEl.value) || 24;
+  const streamBadge = document.getElementById("stream-badge");
+  const liveDot = document.getElementById("live-dot");
+
+  if (streamBadge) {
+    streamBadge.textContent = "SSE CONNECTING";
+    streamBadge.className = "badge badge-info";
+  }
+
+  eventSource = new EventSource(`/api/stream?hours=${encodeURIComponent(hours)}`);
+
+  eventSource.addEventListener("stats", (event) => {
+    if (streamBadge) {
+      streamBadge.textContent = "SSE LIVE";
+      streamBadge.className = "badge badge-success";
+    }
+    if (liveDot) liveDot.classList.remove("paused");
+    try {
+      const data = JSON.parse(event.data);
+      applyDashboardData(data);
+    } catch (e) {
+      console.error("SSE parse error:", e);
+    }
+  });
+
+  eventSource.onerror = () => {
+    if (streamBadge) {
+      streamBadge.textContent = "RECONNECTING";
+      streamBadge.className = "badge badge-warning";
+    }
+    if (liveDot) liveDot.classList.add("paused");
+  };
+}
+
+function disconnectStream() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const jaBtn = document.getElementById("lang-ja-btn");
+  const enBtn = document.getElementById("lang-en-btn");
+  if (jaBtn) jaBtn.addEventListener("click", () => applyLanguage("ja"));
+  if (enBtn) enBtn.addEventListener("click", () => applyLanguage("en"));
+
+  applyLanguage(currentLang);
+
+  if (document.getElementById("attack-map")) {
+    initMap();
+    connectStream();
+
+    window.addEventListener("resize", () => {
+      if (mapInstance) {
+        mapInstance.invalidateSize();
+      }
+    });
+
+    const refreshBtn = document.getElementById("refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", fetchOnce);
+
+    const hoursSelect = document.getElementById("hours-select");
+    if (hoursSelect) {
+      hoursSelect.addEventListener("change", () => {
+        seenEventIds.clear();
+        if (isStreamPaused) {
+          fetchOnce();
+        } else {
+          connectStream();
+        }
+      });
+    }
+
+    const toggleBtn = document.getElementById("toggle-stream-btn");
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", (e) => {
+        isStreamPaused = !isStreamPaused;
+        const btn = e.currentTarget;
+        const streamBadge = document.getElementById("stream-badge");
+        const liveDot = document.getElementById("live-dot");
+
+        if (isStreamPaused) {
+          disconnectStream();
+          btn.textContent = t("resume_btn");
+          if (streamBadge) {
+            streamBadge.textContent = "PAUSED";
+            streamBadge.className = "badge badge-warning";
+          }
+          if (liveDot) liveDot.classList.add("paused");
+        } else {
+          btn.textContent = t("pause_btn");
+          connectStream();
+        }
+      });
+    }
+
+    const searchInput = document.getElementById("ip-search-input");
+    const clearBtn = document.getElementById("clear-search-btn");
+
+    if (searchInput) {
+      searchInput.addEventListener("input", (e) => {
+        searchQuery = e.target.value || "";
+        if (latestData) renderTables(latestData);
+      });
+    }
+
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        if (searchInput) searchInput.value = "";
+        searchQuery = "";
+        if (latestData) renderTables(latestData);
+      });
+    }
+
+    window.addEventListener("beforeunload", disconnectStream);
+  }
+});

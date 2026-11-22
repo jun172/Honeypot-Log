@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Honeypot Threat Intelligence Dashboard (Realtime)</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
+  <link rel="icon" type="image/png" href="/static/AIWeb.png" />
+  <link rel="apple-touch-icon" href="/static/AIWeb.png?v=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span id="live-dot" class="pulse-dot" aria-hidden="true"></span>
+      <h1>HONEYPOT THREAT INTELLIGENCE</h1>
+      <span id="mode-badge" class="badge badge-info">CONNECTING</span>
+      <span id="stream-badge" class="badge badge-success">SSE LIVE</span>
+      <nav class="nav-links" aria-label="Page navigation">
+        <a href="/" class="nav-link active" aria-current="page" data-i18n="nav_dashboard">ダッシュボード</a>
+        <a href="/environment" class="nav-link" data-i18n="nav_env">開発環境・構成</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <div class="lang-switch" role="group" aria-label="Language switcher">
+        <button id="lang-ja-btn" type="button" class="lang-btn active">日本語</button>
+        <button id="lang-en-btn" type="button" class="lang-btn">English</button>
+      </div>
+      <label for="hours-select" data-i18n="period_label">集計期間:</label>
+      <select id="hours-select">
+        <option value="6" data-i18n="period_6h">直近 6時間</option>
+        <option value="24" selected data-i18n="period_24h">直近 24時間</option>
+        <option value="72" data-i18n="period_72h">直近 3日間</option>
+        <option value="168" data-i18n="period_168h">直近 7日間</option>
+      </select>
+      <button id="toggle-stream-btn" type="button" data-i18n="pause_btn">一時停止</button>
+      <button id="refresh-btn" type="button" data-i18n="refresh_btn">即時取得</button>
+      <span id="last-updated" class="muted" role="status" aria-live="polite" data-i18n="connecting">ストリーム接続中...</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="kpi-grid" aria-label="Key metrics">
+      <div class="card kpi-card">
+        <div class="kpi-label" data-i18n="kpi_total">総検知イベント数</div>
+        <div id="kpi-total" class="kpi-value">0</div>
+        <div class="kpi-sub" data-i18n="kpi_total_sub">リアルタイム集計中</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label" data-i18n="kpi_ips">攻撃元ユニークIP</div>
+        <div id="kpi-ips" class="kpi-value">0</div>
+        <div id="kpi-countries-sub" class="kpi-sub">0 ヶ国から観測</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label" data-i18n="kpi_anomaly">高異常度アラート (≥75%)</div>
+        <div id="kpi-anomaly" class="kpi-value danger-text">0</div>
+        <div class="kpi-sub" data-i18n="kpi_anomaly_sub">Isolation Forest 異常検知</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label" data-i18n="kpi_cost">GCP 月間推定コスト</div>
+        <div id="kpi-cost" class="kpi-value accent-text">$0.00</div>
+        <div id="kpi-quota" class="kpi-sub">Logging無料枠消化率: 0%</div>
+      </div>
+    </section>
+
+    <section class="main-grid" aria-label="Geolocation and category analytics">
+      <div class="card map-card">
+        <div class="card-header">
+          <h2 data-i18n="map_title">攻撃元ジオロケーションマップ</h2>
+          <span class="muted" data-i18n="map_sub">ip-api.com バッチ解決</span>
+        </div>
+        <div id="attack-map" role="region" aria-label="Attack source map"></div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="card-header">
+          <h2 data-i18n="chart_title">ML 攻撃カテゴリ分布</h2>
+          <span class="muted">TF-IDF + Naive Bayes</span>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="category-chart" aria-label="Attack category distribution chart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="ranking-grid" aria-label="Top countries and source IPs">
+      <div class="card">
+        <div class="card-header">
+          <h2 data-i18n="country_rank_title">国別攻撃ランキング (Top 10)</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="th_rank">順位</th>
+                <th scope="col" data-i18n="th_country">国・地域</th>
+                <th scope="col" class="num" data-i18n="th_count">検知数</th>
+              </tr>
+            </thead>
+            <tbody id="country-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 data-i18n="ip_rank_title">攻撃元 IP / ISP ランキング (Top 10)</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="th_ip">IPアドレス</th>
+                <th scope="col" data-i18n="th_country">国</th>
+                <th scope="col" data-i18n="th_isp">ISP / 組織</th>
+                <th scope="col" data-i18n="th_tactic">主な手口</th>
+                <th scope="col" class="num" data-i18n="th_times">回数</th>
+              </tr>
+            </thead>
+            <tbody id="ip-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="card timeline-card" aria-label="Realtime attack stream">
+      <div class="card-header">
+        <h2 data-i18n="stream_title">リアルタイム攻撃検知ストリーム（学習・検証用フル表示）</h2>
+        <div class="filter-controls">
+          <label for="ip-search-input" class="visually-hidden" data-i18n="search_placeholder">検索</label>
+          <input
+            id="ip-search-input"
+            type="text"
+            maxlength="200"
+            placeholder="IP・国・ISP・ペイロードで検索（例: 102.23.149.169）"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="clear-search-btn" type="button" data-i18n="clear_btn">クリア</button>
+          <span id="filter-count" class="muted"></span>
+          <span class="muted" data-i18n="sse_note">SSE プッシュ配信（3秒間隔）</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="th_time">時刻 (UTC)</th>
+              <th scope="col" data-i18n="th_source">攻撃元</th>
+              <th scope="col" data-i18n="th_ml">ML分類</th>
+              <th scope="col" data-i18n="th_anomaly">AI異常度</th>
+              <th scope="col" data-i18n="th_payload">リクエスト / ペイロード詳細</th>
+            </tr>
+          </thead>
+          <tbody id="timeline-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

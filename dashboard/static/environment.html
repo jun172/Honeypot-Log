@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Development Environment & Architecture | Honeypot Threat Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" type="image/png" href="/static/AIWeb.png">
+  <link rel="apple-touch-icon" href="/static/AIWeb.png?v=1">
+  <style>
+    .arch-diagram-wrap {
+      margin: 1.25rem 0 1.5rem;
+      padding: 1rem;
+      background: #0f172a;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 12px;
+      overflow-x: auto;
+    }
+    .arch-svg {
+      display: block;
+      width: 100%;
+      min-width: 720px;
+      height: auto;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    }
+    .arch-diagram-caption {
+      margin-top: 0.6rem;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="pulse-dot"></span>
+      <h1>HONEYPOT THREAT INTELLIGENCE</h1>
+      <nav class="nav-links" aria-label="Page navigation">
+        <a href="/environment" class="nav-link active" data-i18n="nav_env">開発環境・構成</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <div class="lang-switch" role="group" aria-label="Language switcher">
+        <button id="lang-ja-btn" type="button" class="lang-btn active">日本語</button>
+        <button id="lang-en-btn" type="button" class="lang-btn">English</button>
+      </div>
+      <a href="/" class="back-link" data-i18n="back_to_dash">← ダッシュボードへ戻る</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 日本語コンテンツ -->
+    <div id="env-content-ja" class="env-content">
+      <section class="card">
+        <div class="card-header">
+          <h2>1. システムの目的と全体概要</h2>
+          <span class="badge badge-info">Cloud Isolated Honeypot</span>
+        </div>
+        <p class="doc-lead">
+          本システムは、インターネット上に存在する無差別なサイバー攻撃や自動スキャン（ボットネット活動）を安全におびき寄せて観測し、収集した攻撃データを機械学習（AI）で自動分類・可視化して一般公開するための「クラウド隔離型ハニーポット・脅威インテリジェンス基盤」です。
+        </p>
+        <p class="doc-body">
+          通常のWebサーバーは攻撃をブロック（防御）することを目的としますが、本システムはあえて無防備なWebサーバーや古いルーターの挙動を模倣する「おとり（ハニーポット）」としてインターネットに公開します。世界中から送り込まれる不正リクエストの送信元IP、HTTPヘッダ、ペイロード（攻撃コマンド）をリアルタイムに記録し、別の専用プロジェクトへ自動隔離したうえで、安全な統計データへと無害化・加工し、誰もがブラウザから閲覧できるWebダッシュボードとして公開する一連のパイプラインを備えています。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>2. システム全体の4層アーキテクチャ</h2>
+          <span class="badge badge-success">Zero Trust / Isolation</span>
+        </div>
+
+        <!-- インライン SVG 図解（日本語） -->
+        <div class="arch-diagram-wrap" role="img" aria-label="システム全体の4層アーキテクチャ図">
+          <svg class="arch-svg" viewBox="0 0 920 500" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow-cyan-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+              </marker>
+              <marker id="arrow-red-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171" />
+              </marker>
+              <marker id="arrow-green-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#4ade80" />
+              </marker>
+              <marker id="arrow-amber-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+              </marker>
+            </defs>
+
+            <!-- 背景グリッド装飾 -->
+            <rect x="0" y="0" width="920" height="500" rx="10" fill="#0f172a" />
+
+            <!-- 左側：外部攻撃者 / ボットネット -->
+            <rect x="20" y="55" width="175" height="125" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.5" />
+            <text x="107" y="82" fill="#f87171" font-size="13" font-weight="700" text-anchor="middle">外部インターネット</text>
+            <text x="107" y="102" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">自動スキャン / ボットネット</text>
+            <text x="107" y="124" fill="#94a3b8" font-size="11" text-anchor="middle">HTTP / Port 80</text>
+            <text x="107" y="142" fill="#94a3b8" font-size="11" text-anchor="middle">不正リクエスト・ペイロード</text>
+            <text x="107" y="162" fill="#fca5a5" font-size="10.5" text-anchor="middle">送信元IP・ヘッダ記録</text>
+
+            <!-- 左下：一般閲覧ユーザー -->
+            <rect x="20" y="335" width="175" height="110" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
+            <text x="107" y="362" fill="#38bdf8" font-size="13" font-weight="700" text-anchor="middle">一般閲覧ユーザー</text>
+            <text x="107" y="384" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">Webブラウザ</text>
+            <text x="107" y="406" fill="#94a3b8" font-size="11" text-anchor="middle">無害化済み統計・世界地図</text>
+            <text x="107" y="424" fill="#94a3b8" font-size="11" text-anchor="middle">リアルタイム可視化閲覧</text>
+
+            <!-- ① おとり観測層（honeypot-515503） -->
+            <rect x="245" y="25" width="320" height="175" rx="10" fill="#172554" stroke="#60a5fa" stroke-width="1.8" />
+            <text x="405" y="48" fill="#93c5fd" font-size="12.5" font-weight="700" text-anchor="middle">① おとり観測層（honeypot-515503）</text>
+            <text x="405" y="66" fill="#bfdbfe" font-size="11" text-anchor="middle">Compute Engine (e2-micro / us-central1)</text>
+
+            <!-- ② 多層防御ネットワーク層（hp-vpc） -->
+            <rect x="260" y="78" width="290" height="108" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5 3" />
+            <text x="405" y="97" fill="#6ee7b7" font-size="11.5" font-weight="700" text-anchor="middle">② 多層防御ネットワーク層（hp-vpc）</text>
+            <text x="405" y="115" fill="#e2e8f0" font-size="11" text-anchor="middle">COS + Docker (honeypot.py :80 / 7日自動削除)</text>
+            <text x="405" y="133" fill="#a7f3d0" font-size="10.5" text-anchor="middle">外向き遮断(Egress Deny) / Private Google Access</text>
+            <text x="405" y="149" fill="#a7f3d0" font-size="10.5" text-anchor="middle">--read-only / --cap-drop=ALL / nobody / IAP SSH</text>
+            <text x="405" y="166" fill="#fca5a5" font-size="10.5" text-anchor="middle">外部への踏み台通信・メタデータ通信を遮断</text>
+
+            <!-- ③ ログ自動隔離・保全層（honeypot-logs-515503） -->
+            <rect x="625" y="45" width="275" height="155" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8" />
+            <text x="762" y="70" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">③ ログ自動隔離・保全層</text>
+            <text x="762" y="88" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">別プロジェクト: honeypot-logs-515503</text>
+            <text x="762" y="112" fill="#e2e8f0" font-size="11" text-anchor="middle">Cloud Logging シンク（内部バックボーン転送）</text>
+            <text x="762" y="132" fill="#e2e8f0" font-size="11" text-anchor="middle">専用ログバケットへリアルタイム隔離保存</text>
+            <text x="762" y="156" fill="#fcd34d" font-size="10.5" text-anchor="middle">本番環境から削除・編集不可（Write-Only）</text>
+            <text x="762" y="174" fill="#94a3b8" font-size="10.5" text-anchor="middle">証拠隠滅を防止するフォレンジック保全</text>
+
+            <!-- ④ AI分析・一般公開層（Cloud Run & FastAPI） -->
+            <rect x="245" y="295" width="655" height="165" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
+            <text x="572" y="320" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">④ AI分析・一般公開層（Cloud Run ＆ FastAPI ダッシュボード）</text>
+            <text x="572" y="340" fill="#bbf7d0" font-size="11" text-anchor="middle">閲覧専用サービスアカウント（roles/logging.viewer / 最小権限）</text>
+
+            <!-- 内部処理サブボックス -->
+            <rect x="268" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="360" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">ML 分類・異常検知</text>
+            <text x="360" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">TF-IDF + MultinomialNB</text>
+            <text x="360" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Isolation Forest</text>
+
+            <rect x="478" y="356" width="190" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="573" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">無害化・GeoIP・コスト算出</text>
+            <text x="573" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">サニタイズ / GeoIP・ISP解決</text>
+            <text x="573" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">GCP 推定コスト算出</text>
+
+            <rect x="693" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="785" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Web ダッシュボード配信</text>
+            <text x="785" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">FastAPI + HTML/CSS/JS</text>
+            <text x="785" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Chart.js / Leaflet.js</text>
+
+            <!-- 矢印：攻撃者 -> おとり観測層 -->
+            <line x1="195" y1="115" x2="256" y2="115" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-ja)" />
+            <text x="225" y="106" fill="#fca5a5" font-size="10" font-weight="600" text-anchor="middle">攻撃通信</text>
+
+            <!-- 矢印：おとり観測層 -> ログ自動隔離層 -->
+            <line x1="565" y1="118" x2="621" y2="118" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-ja)" />
+            <text x="593" y="108" fill="#fde68a" font-size="9.8" font-weight="600" text-anchor="middle">ログ転送</text>
+
+            <!-- 矢印：ログ自動隔離層 -> AI分析・公開層 -->
+            <path d="M 762 200 L 762 248 L 572 248 L 572 291" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-ja)" />
+            <text x="667" y="240" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">隔離ログ読取（roles/logging.viewer）</text>
+
+            <!-- 矢印：AI分析・公開層 -> 一般閲覧ユーザー -->
+            <line x1="245" y1="390" x2="199" y2="390" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-ja)" />
+            <text x="222" y="380" fill="#86efac" font-size="10" font-weight="600" text-anchor="middle">可視化</text>
+          </svg>
+          <div class="arch-diagram-caption">図1：クラウド隔離型ハニーポット・脅威インテリジェンス 4層アーキテクチャとデータフロー</div>
+        </div>
+
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>① おとり観測層（本番ハニーポット環境：<code>honeypot-515503</code>）</h3>
+            <p>
+              Google Cloud（GCP）の Compute Engine（<code>e2-micro</code> / 米国リージョン <code>us-central1</code>）上に、コンテナ特化型OSである Container-Optimized OS（COS）を採用して構築しています。Python製の軽量HTTPハニーポット（<code>honeypot.py</code>）が80番ポートで待ち受け、アクセスに対して偽装レスポンス（<code>Server: nginx</code> およびダミーHTML）を返却しつつ、リクエストの全容を構造化JSON形式で標準出力へ書き出します。万が一の放置による課金やリスクを防ぐため、インスタンス作成から7日間で自動削除される使い捨て設計（<code>--max-run-duration=7d</code>）を組み込んでいます。
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>② 多層防御・踏み台化防止ネットワーク層（カスタムVPC：<code>hp-vpc</code>）</h3>
+            <ul>
+              <li><strong>外向き通信の完全遮断（Egress Deny）:</strong> ファイアウォールルールにより、ハニーポットから外部インターネットへの発信通信をすべて拒否しています。</li>
+              <li><strong>限定公開 Google アクセス（Private Google Access）:</strong> 外部ネットを遮断したままコンテナイメージの取得（Artifact Registry）とログ送信（Cloud Logging）のみを行えるよう、Cloud DNS のプライベートゾーンとファイアウォールで Google API 専用IP帯域（<code>199.36.153.8/30</code>）への通信だけを例外的に許可しています。</li>
+              <li><strong>コンテナのハードニング:</strong> Dockerコンテナ起動時に「読み取り専用ファイルシステム（<code>--read-only</code>）」「全Linuxケーパビリティ剥奪（<code>--cap-drop=ALL</code>）」「非特権ユーザー実行（<code>nobody</code>）」「GCPメタデータサーバー（<code>169.254.169.254</code>）への通信遮断」を適用しています。</li>
+              <li><strong>管理経路の暗号化（IAP トンネル）:</strong> SSH（22番ポート）はインターネットに公開せず、Identity-Aware Proxy（IAP / <code>35.235.240.0/20</code>）を通じた認証済み暗号化トンネル経由でのみ接続を許可しています。</li>
+            </ul>
+          </div>
+          <div class="arch-box">
+            <h3>③ ログ自動隔離・保全層（ログ専用プロジェクト：<code>honeypot-logs-515503</code>）</h3>
+            <p>
+              攻撃者がハニーポット側の権限を侵害して証拠隠滅を図るリスクを排除するため、ログの保管場所を本番環境とは別のGCPプロジェクトへ完全に分離しています。本番プロジェクトの Cloud Logging に出力されたコンテナログは、GCP内部バックボーンを通る「ログシンク（ログルーター）」によって検知された瞬間に隔離プロジェクトのログバケットへリアルタイム転送されます。本番環境には隔離先ログの削除・編集権限を持たせない一方向（Write-Only）の設計です。
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>④ AI分析・一般公開層（Cloud Run ＆ FastAPI ダッシュボード）</h3>
+            <p>
+              隔離プロジェクトに蓄積されたログを外部へ公開するためのWebアプリケーション層です。Cloud Run 上で FastAPI（Python）と HTML / CSS / JavaScript によるダッシュボードを稼働させ、閲覧専用（<code>roles/logging.viewer</code>）の最小権限を持つサービスアカウントで隔離ログを読み取ります。TF-IDF + Multinomial Naive Bayes と Isolation Forest による攻撃分類・異常検知、GeoIPマッピング、無害化（サニタイズ）、GCP推定コスト算出をリアルタイムに行います。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>3. 今回のシステムで使用しているGCPサービス一覧</h2>
+          <span class="badge badge-info">GCP Services</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>カテゴリ</th>
+                <th>GCP サービス名（正式名称）</th>
+                <th>本システムでの役割</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>サーバー（仮想マシン）</strong></td>
+                <td>Compute Engine</td>
+                <td>ハニーポット本体を動かす仮想マシン（<code>hp-vm-us-01</code> / <code>e2-micro</code>）の実行基盤。</td>
+              </tr>
+              <tr>
+                <td><strong>OS（コンテナ基盤）</strong></td>
+                <td>Container-Optimized OS (COS)</td>
+                <td>Google製の軽量・高セキュリティOS。VM上でDockerコンテナを安全に稼働させるために使用。</td>
+              </tr>
+              <tr>
+                <td><strong>コンテナ保管庫</strong></td>
+                <td>Artifact Registry</td>
+                <td>ビルドしたハニーポットのDockerイメージを保存・配信するプライベートレジストリ。</td>
+              </tr>
+              <tr>
+                <td><strong>ネットワーク・通信制御</strong></td>
+                <td>Virtual Private Cloud (VPC)</td>
+                <td>外部と隔離されたカスタムネットワーク（<code>hp-vpc</code>）とサブネット、ファイアウォールルールの構築。</td>
+              </tr>
+              <tr>
+                <td><strong>プライベートDNS</strong></td>
+                <td>Cloud DNS</td>
+                <td>外部インターネット遮断下でもGoogle APIへ接続できるよう、内部向けの名前解決（プライベートゾーン）を提供。</td>
+              </tr>
+              <tr>
+                <td><strong>安全管理アクセス</strong></td>
+                <td>Identity-Aware Proxy (IAP)</td>
+                <td>外部にSSHポートを公開せず、認証済みの暗号化トンネル経由でVMへ安全にSSH接続するために使用。</td>
+              </tr>
+              <tr>
+                <td><strong>ログ収集・隔離転送</strong></td>
+                <td>Cloud Logging</td>
+                <td>ハニーポットが記録した攻撃通信の保存（ログバケット）および、別プロジェクトへの自動転送（ログシンク）。</td>
+              </tr>
+              <tr>
+                <td><strong>権限・セキュリティ管理</strong></td>
+                <td>Identity and Access Management (IAM)</td>
+                <td>ログ転送用サービスアカウントやダッシュボード閲覧用の最小権限（ロール）を制御。</td>
+              </tr>
+              <tr>
+                <td><strong>公開Webアプリ基盤</strong></td>
+                <td>Cloud Run</td>
+                <td>一般公開用のAI分析ダッシュボード（FastAPI）をサーバーレスで公開する実行環境。</td>
+              </tr>
+              <tr>
+                <td><strong>ビルド・デプロイ</strong></td>
+                <td>Cloud Build </td>
+                <td>Cloud Run へダッシュボードをデプロイする際、ソースコードからコンテナを自動ビルドする基盤。</td>
+              </tr>
+              <tr>
+                <td><strong>プロジェクト・課金管理</strong></td>
+                <td>Resource Manager / Cloud Billing</td>
+                <td>本番用（<code>honeypot-515503</code>）とログ隔離用（<code>honeypot-logs-515503</code>）のプロジェクト分離とコスト管理。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>4. 開発環境・使用技術スタック一覧</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>カテゴリ</th>
+                <th>採用技術・ツール・サービス</th>
+                <th>用途・役割</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>ローカル開発端末</strong></td>
+                <td>macOS（MacBook Air） / zsh</td>
+                <td>開発作業・CLIによるインフラ構築および検証</td>
+              </tr>
+              <tr>
+                <td><strong>エディタ・バージョン管理</strong></td>
+                <td>Visual Studio Code / Git / GitHub</td>
+                <td>ソースコード編集・リポジトリ管理（<code>jun172/honeypot</code>）</td>
+              </tr>
+              <tr>
+                <td><strong>クラウド基盤（IaC / CLI）</strong></td>
+                <td>Google Cloud（GCP） / Google Cloud CLI（<code>gcloud</code>）</td>
+                <td>VPC・VM・IAM・Cloud Logging・Cloud Run の構築・運用</td>
+              </tr>
+              <tr>
+                <td><strong>ハニーポット実行環境</strong></td>
+                <td>Compute Engine（<code>e2-micro</code>） / Container-Optimized OS / Docker</td>
+                <td>80番ポートでの攻撃待ち受けおよびハードニング実行</td>
+              </tr>
+              <tr>
+                <td><strong>バックエンド・機械学習</strong></td>
+                <td>Python 3.12 / FastAPI / Uvicorn / scikit-learn / NumPy / httpx</td>
+                <td>ログ取得API・攻撃分類モデル・異常検知・GeoIP解決・料金計算</td>
+              </tr>
+              <tr>
+                <td><strong>フロントエンド可視化</strong></td>
+                <td>HTML5 / CSS3 / JavaScript（ES6+） / Chart.js / Leaflet.js</td>
+                <td>レスポンシブUI・世界地図マッピング・国旗表示・統計グラフ描画</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>5. 実稼働テストで確認された観測成果</h2>
+          <span class="badge badge-danger">Live Observation</span>
+        </div>
+        <p class="doc-body">
+          本システムをインターネット上に公開した初期稼働テストでは、公開からわずか1時間以内に世界各国（南アフリカ・インド・ブラジル等）のISP配下にある複数のボットネット端末から、ルーターのコマンドインジェクション脆弱性（<code>/boaform/admin/formSysCmd</code>）を狙った一斉攻撃を観測しました。ペイロード解析により、ホスティング事業者配下にあるC2サーバー（<code>45.90.163.37:4545</code>）へリバースシェルを接続させようとする分散型攻撃インフラの構造を特定・記録しつつ、多層防御によって外部への発信通信を完全に遮断できることが実証されています。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>6. セキュリティ補強・安全設計と運用機能</h2>
+          <span class="badge badge-success">Hardened &amp; Operational</span>
+        </div>
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>XSS・インジェクション対策</h3>
+            <p>
+              攻撃者の送信元IP、ISP名、リクエストパス、攻撃ペイロードなどの外部由来データを <code>innerHTML</code> やHTML文字列結合で差し込まず、<code>textContent</code> および <code>document.createElement()</code> ベースで描画することでスクリプト解釈やDOMインジェクションを防止しています。バッジクラス名のホワイトリスト制限や、地図ポップアップ・座標・件数の妥当性チェックも組み込んでいます。
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>バックエンド入力サニタイズ・リソース保護</h3>
+            <p>
+              制御文字の除去や表示長の上限設定（<code>…(truncated)</code> による切り詰め）により、長大・不正なペイロードによる表示崩れや負荷を抑えています。GeoIPキャッシュやレスポンスキャッシュには上限数とTTLを設けてメモリ肥大化や過剰な外部照会を防ぎつつ、静的ファイル配信時のパス検証、セキュリティヘッダー（<code>X-Content-Type-Options</code>、<code>X-Frame-Options</code>、<code>Referrer-Policy</code>）の付与、ストリームエラー時の内部情報秘匿、外部送信（Egress）制限による踏み台化防止を組み合わせた構成としています。
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>最小権限（IAM）・運用機能</h3>
+            <p>
+              ダッシュボード閲覧用サービスアカウントを分離し、必要な閲覧権限（<code>roles/logging.viewer</code>）に絞った最小権限運用を行っています。画面上では日本語／英語のUI切替、リアルタイムSSEストリームの一時停止・再開・即時取得、送信元IP・国・ISP・ペイロードを横断する検索・フィルタリングなどの分析・運用機能に対応しています。
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 英語コンテンツ -->
+    <div id="env-content-en" class="env-content" style="display: none;">
+      <section class="card">
+        <div class="card-header">
+          <h2>1. Purpose & System Overview</h2>
+          <span class="badge badge-info">Cloud Isolated Honeypot</span>
+        </div>
+        <p class="doc-lead">
+          This system is a cloud-isolated honeypot and threat intelligence platform designed to safely attract and observe indiscriminate cyberattacks and automated botnet scans on the internet, classify and score threats using machine learning, and visualize sanitized telemetry on a web dashboard.
+        </p>
+        <p class="doc-body">
+          While typical web servers aim to block attacks, this system intentionally exposes a decoy web/router endpoint (<code>honeypot.py</code>) to capture real-world source IPs, HTTP headers, and exploit payloads in real time. Captured events are automatically routed to an isolated logging project, sanitized for safe public display, and streamed to a responsive FastAPI + Leaflet.js + Chart.js dashboard.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>2. Four-Layer Architecture</h2>
+          <span class="badge badge-success">Zero Trust / Isolation</span>
+        </div>
+
+        <!-- インライン SVG 図解（英語） -->
+        <div class="arch-diagram-wrap" role="img" aria-label="Four-Layer System Architecture Diagram">
+          <svg class="arch-svg" viewBox="0 0 920 500" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow-cyan-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+              </marker>
+              <marker id="arrow-red-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171" />
+              </marker>
+              <marker id="arrow-green-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#4ade80" />
+              </marker>
+              <marker id="arrow-amber-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+              </marker>
+            </defs>
+
+            <rect x="0" y="0" width="920" height="500" rx="10" fill="#0f172a" />
+
+            <!-- Left Top: External Scanners / Botnets -->
+            <rect x="20" y="55" width="175" height="125" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.5" />
+            <text x="107" y="82" fill="#f87171" font-size="13" font-weight="700" text-anchor="middle">External Internet</text>
+            <text x="107" y="102" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">Scanners &amp; Botnets</text>
+            <text x="107" y="124" fill="#94a3b8" font-size="11" text-anchor="middle">HTTP / Port 80</text>
+            <text x="107" y="142" fill="#94a3b8" font-size="11" text-anchor="middle">Exploit Payloads</text>
+            <text x="107" y="162" fill="#fca5a5" font-size="10.5" text-anchor="middle">Source IP &amp; Headers</text>
+
+            <!-- Left Bottom: Public Viewers -->
+            <rect x="20" y="335" width="175" height="110" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
+            <text x="107" y="362" fill="#38bdf8" font-size="13" font-weight="700" text-anchor="middle">Public Viewers</text>
+            <text x="107" y="384" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">Web Browser</text>
+            <text x="107" y="406" fill="#94a3b8" font-size="11" text-anchor="middle">Sanitized Telemetry</text>
+            <text x="107" y="424" fill="#94a3b8" font-size="11" text-anchor="middle">Map &amp; Live SSE Stream</text>
+
+            <!-- Layer 1: Decoy Observation Layer -->
+            <rect x="245" y="25" width="320" height="175" rx="10" fill="#172554" stroke="#60a5fa" stroke-width="1.8" />
+            <text x="405" y="48" fill="#93c5fd" font-size="12.5" font-weight="700" text-anchor="middle">1. Decoy Observation (honeypot-515503)</text>
+            <text x="405" y="66" fill="#bfdbfe" font-size="11" text-anchor="middle">Compute Engine (e2-micro / us-central1)</text>
+
+            <!-- Layer 2: Defense-in-Depth Network Layer -->
+            <rect x="260" y="78" width="290" height="108" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5 3" />
+            <text x="405" y="97" fill="#6ee7b7" font-size="11.5" font-weight="700" text-anchor="middle">2. Network Isolation Layer (hp-vpc)</text>
+            <text x="405" y="115" fill="#e2e8f0" font-size="11" text-anchor="middle">COS + Docker (honeypot.py :80 / 7d TTL)</text>
+            <text x="405" y="133" fill="#a7f3d0" font-size="10.5" text-anchor="middle">Egress Deny / Private Google Access</text>
+            <text x="405" y="149" fill="#a7f3d0" font-size="10.5" text-anchor="middle">--read-only / --cap-drop=ALL / nobody / IAP</text>
+            <text x="405" y="166" fill="#fca5a5" font-size="10.5" text-anchor="middle">Outbound Pivot &amp; Metadata Blocked</text>
+
+            <!-- Layer 3: Log Isolation & Preservation Layer -->
+            <rect x="625" y="45" width="275" height="155" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8" />
+            <text x="762" y="70" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">3. Log Isolation Layer</text>
+            <text x="762" y="88" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">Project: honeypot-logs-515503</text>
+            <text x="762" y="112" fill="#e2e8f0" font-size="11" text-anchor="middle">Cloud Logging Sink (Internal Backbone)</text>
+            <text x="762" y="132" fill="#e2e8f0" font-size="11" text-anchor="middle">Real-Time Isolated Log Bucket</text>
+            <text x="762" y="156" fill="#fcd34d" font-size="10.5" text-anchor="middle">Write-Only from Honeypot (No Delete)</text>
+            <text x="762" y="174" fill="#94a3b8" font-size="10.5" text-anchor="middle">Tamper-Resistant Forensic Storage</text>
+
+            <!-- Layer 4: AI Analytics & Visualization Layer -->
+            <rect x="245" y="295" width="655" height="165" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
+            <text x="572" y="320" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">4. AI Analytics &amp; Visualization (Cloud Run &amp; FastAPI)</text>
+            <text x="572" y="340" fill="#bbf7d0" font-size="11" text-anchor="middle">Least-Privilege Viewer SA (roles/logging.viewer)</text>
+
+            <rect x="268" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="360" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">ML &amp; Anomaly Scoring</text>
+            <text x="360" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">TF-IDF + MultinomialNB</text>
+            <text x="360" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Isolation Forest</text>
+
+            <rect x="478" y="356" width="190" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="573" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Sanitize, GeoIP &amp; Cost</text>
+            <text x="573" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">Field Sanitization &amp; GeoIP</text>
+            <text x="573" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">GCP Cost Estimation</text>
+
+            <rect x="693" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="785" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Dashboard UI</text>
+            <text x="785" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">FastAPI + HTML/CSS/JS</text>
+            <text x="785" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Chart.js / Leaflet.js</text>
+
+            <!-- Arrows -->
+            <line x1="195" y1="115" x2="256" y2="115" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-en)" />
+            <text x="225" y="106" fill="#fca5a5" font-size="10" font-weight="600" text-anchor="middle">Attack</text>
+
+            <line x1="565" y1="118" x2="621" y2="118" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-en)" />
+            <text x="593" y="108" fill="#fde68a" font-size="9.8" font-weight="600" text-anchor="middle">Log Sink</text>
+
+            <path d="M 762 200 L 762 248 L 572 248 L 572 291" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-en)" />
+            <text x="667" y="240" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">Read Logs (roles/logging.viewer)</text>
+
+            <line x1="245" y1="390" x2="199" y2="390" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-en)" />
+            <text x="222" y="380" fill="#86efac" font-size="10" font-weight="600" text-anchor="middle">Stream</text>
+          </svg>
+          <div class="arch-diagram-caption">Figure 1: Four-Layer Cloud-Isolated Honeypot &amp; Threat Intelligence Architecture</div>
+        </div>
+
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>1. Decoy Observation Layer (Production Honeypot: <code>honeypot-515503</code>)</h3>
+            <p>
+              Built on Google Cloud Compute Engine (<code>e2-micro</code> in <code>us-central1</code>) running Container-Optimized OS (COS). A lightweight Python HTTP honeypot listens on port 80, returns a plausible decoy response (<code>Server: nginx</code> and dummy HTML), and emits structured JSON logs to stdout with an automatic 7-day maximum run duration (<code>--max-run-duration=7d</code>).
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>2. Defense-in-Depth Network Layer (Custom VPC: <code>hp-vpc</code>)</h3>
+            <ul>
+              <li><strong>Outbound Egress Deny:</strong> Firewall rules block general outbound internet traffic from the honeypot so it cannot be abused as a pivot or DDoS source.</li>
+              <li><strong>Private Google Access:</strong> Private DNS and firewall allow-rules restrict traffic solely to Google APIs VIP (<code>199.36.153.8/30</code>) for pulling container images from Artifact Registry and writing Cloud Logging entries.</li>
+              <li><strong>Container Hardening:</strong> Runs with a read-only root filesystem (<code>--read-only</code>), all Linux capabilities dropped (<code>--cap-drop=ALL</code>), non-root user (<code>nobody</code>), and blocked access to the GCE metadata endpoint (<code>169.254.169.254</code>).</li>
+              <li><strong>Encrypted Management via IAP:</strong> Direct public SSH (port 22) is closed; administrative access is permitted only through Identity-Aware Proxy (IAP / <code>35.235.240.0/20</code>).</li>
+            </ul>
+          </div>
+          <div class="arch-box">
+            <h3>3. Log Isolation & Preservation Layer (<code>honeypot-logs-515503</code>)</h3>
+            <p>
+              Logs are routed via a Cloud Logging sink over Google's internal backbone to a separate log-isolation GCP project. The honeypot runtime has no permission to alter or delete isolated logs, preserving forensic integrity even if the decoy container is compromised.
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>4. AI Analytics & Visualization Layer (Cloud Run & FastAPI)</h3>
+            <p>
+              A FastAPI backend running on Cloud Run reads isolated logs using a least-privilege viewer service account (<code>roles/logging.viewer</code>), performs TF-IDF + Multinomial Naive Bayes classification and Isolation Forest anomaly scoring, resolves GeoIP/ISP metadata, sanitizes sensitive fields, and streams live updates via Server-Sent Events (SSE).
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>3. GCP Services Used in This System</h2>
+          <span class="badge badge-info">GCP Services</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Google Cloud Service</th>
+                <th>Role in This System</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Compute / VM</strong></td>
+                <td>Compute Engine</td>
+                <td>Execution runtime for the honeypot virtual machine (<code>hp-vm-us-01</code> / <code>e2-micro</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>Container OS</strong></td>
+                <td>Container-Optimized OS (COS)</td>
+                <td>Hardened, lightweight Google OS for running Docker containers securely on VMs.</td>
+              </tr>
+              <tr>
+                <td><strong>Container Registry</strong></td>
+                <td>Artifact Registry</td>
+                <td>Private registry storing and serving built honeypot Docker container images.</td>
+              </tr>
+              <tr>
+                <td><strong>Network & Firewall</strong></td>
+                <td>Virtual Private Cloud (VPC)</td>
+                <td>Isolated custom network (<code>hp-vpc</code>), subnets, and firewall rules.</td>
+              </tr>
+              <tr>
+                <td><strong>Private DNS</strong></td>
+                <td>Cloud DNS</td>
+                <td>Internal name resolution (private zone) for reaching Google APIs without public internet egress.</td>
+              </tr>
+              <tr>
+                <td><strong>Secure Access</strong></td>
+                <td>Identity-Aware Proxy (IAP)</td>
+                <td>Authenticated encrypted SSH tunnel access to VMs without exposing port 22 publicly.</td>
+              </tr>
+              <tr>
+                <td><strong>Logging & Routing</strong></td>
+                <td>Cloud Logging</td>
+                <td>Log bucket storage for captured attack traffic and real-time log sink forwarding to an isolated project.</td>
+              </tr>
+              <tr>
+                <td><strong>Access & Security</strong></td>
+                <td>Identity and Access Management (IAM)</td>
+                <td>Least-privilege roles for log sink service accounts and dashboard log readers.</td>
+              </tr>
+              <tr>
+                <td><strong>Serverless Web</strong></td>
+                <td>Cloud Run (Planned)</td>
+                <td>Serverless runtime hosting the public FastAPI threat intelligence dashboard.</td>
+              </tr>
+              <tr>
+                <td><strong>Build & Deploy</strong></td>
+                <td>Cloud Build (Planned)</td>
+                <td>Automated container image builder from source for Cloud Run deployments.</td>
+              </tr>
+              <tr>
+                <td><strong>Projects & Billing</strong></td>
+                <td>Resource Manager / Cloud Billing</td>
+                <td>Project separation (<code>honeypot-515503</code> and <code>honeypot-logs-515503</code>) and cost governance.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>4. Development Environment & Tech Stack</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Technologies / Tools / Services</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Local Workstation</strong></td>
+                <td>macOS (MacBook Air) / zsh</td>
+                <td>Local development, CLI provisioning, and verification</td>
+              </tr>
+              <tr>
+                <td><strong>Editor & Source Control</strong></td>
+                <td>Visual Studio Code / Git / GitHub</td>
+                <td>Code authoring and repository management (<code>jun172/honeypot</code>)</td>
+              </tr>
+              <tr>
+                <td><strong>Cloud Platform & CLI</strong></td>
+                <td>Google Cloud (GCP) / Google Cloud CLI (<code>gcloud</code>)</td>
+                <td>VPC, Compute Engine, IAM, Cloud Logging, and Cloud Run operations</td>
+              </tr>
+              <tr>
+                <td><strong>Honeypot Runtime</strong></td>
+                <td>Compute Engine (<code>e2-micro</code>) / Container-Optimized OS / Docker</td>
+                <td>Port 80 decoy listener and hardened container execution</td>
+              </tr>
+              <tr>
+                <td><strong>Backend & Machine Learning</strong></td>
+                <td>Python 3.12 / FastAPI / Uvicorn / scikit-learn / NumPy / httpx</td>
+                <td>Log ingestion API, ML classifier, anomaly detector, GeoIP batch lookup, cost estimator</td>
+              </tr>
+              <tr>
+                <td><strong>Frontend Visualization</strong></td>
+                <td>HTML5 / CSS3 / JavaScript (ES6+) / Chart.js / Leaflet.js</td>
+                <td>Responsive UI, interactive world map, category charts, and live event stream</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>5. Initial Field Observations</h2>
+          <span class="badge badge-danger">Live Observation</span>
+        </div>
+        <p class="doc-body">
+          Within the first hour of initial internet exposure, automated scanners and botnet nodes across multiple regions (including South Africa, India, and Brazil) probed router command-injection endpoints such as <code>/boaform/admin/formSysCmd</code> with reverse-shell payloads (e.g., <code>nc ... 4545|sh</code> targeting <code>45.90.163.37:4545</code>), while egress controls prevented outbound connections from the honeypot.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>6. Security Hardening, Safety &amp; Operational Features</h2>
+          <span class="badge badge-success">Hardened &amp; Operational</span>
+        </div>
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>XSS &amp; DOM Safety</h3>
+            <p>
+              Untrusted external fields such as source IPs, ISPs, paths, and payloads are rendered using <code>textContent</code> and <code>document.createElement()</code> rather than <code>innerHTML</code> or raw HTML string concatenation. Badge class names are allowlisted, and map popups, coordinates, and counts are validated before rendering.
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>Input Sanitization &amp; Resource Protection</h3>
+            <p>
+              Control characters are stripped and long fields are bounded with truncation (<code>…(truncated)</code>) to prevent layout breakage or heavy load from oversized or malformed payloads. GeoIP and response caches use size limits and TTLs, paired with static path validation, security headers (<code>X-Content-Type-Options</code>, <code>X-Frame-Options</code>, <code>Referrer-Policy</code>), redaction of internal error details in streams, and outbound egress restrictions.
+            </p>
+          </div>
+          <div class="arch-box">
+            <h3>Least-Privilege IAM &amp; Operations</h3>
+            <p>
+              A dedicated viewer service account restricts log access to <code>roles/logging.viewer</code>. The UI supports Japanese/English switching, real-time SSE stream pause/resume/immediate refresh, and search/filtering across IP, country, ISP, and payload fields.
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
