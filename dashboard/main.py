@@ -31,6 +31,7 @@ logger = std_logging.getLogger("honeypot-dashboard")
 MAX_ALLOWED_LIMIT = int(os.getenv("MAX_ALLOWED_LIMIT", "50000"))
 MAX_LOG_CACHE_ENTRIES = int(os.getenv("MAX_LOG_CACHE_ENTRIES", "128"))
 MAX_GEO_CACHE_ENTRIES = int(os.getenv("MAX_GEO_CACHE_ENTRIES", "10000"))
+MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(10 * 1024 * 1024)))  # 10MB
 MIN_STREAM_INTERVAL_SEC = 1.0
 
 # ==========================================
@@ -53,7 +54,7 @@ LOG_GCS_BUCKETS: list[str] = [
     item.strip() for item in _RAW_GCS_BUCKETS.split(",") if item.strip()
 ]
 
-LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "both").strip().lower()  # both | logging | gcs
+LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "both").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
 MAX_GCS_BLOBS = min(max(int(os.getenv("MAX_GCS_BLOBS", "200")), 1), 2000)
@@ -63,7 +64,9 @@ MAX_TIMELINE_EVENTS = min(
 )
 
 USD_TO_JPY = float(os.getenv("USD_TO_JPY", "152.0"))
-STREAM_INTERVAL_SEC = max(float(os.getenv("STREAM_INTERVAL_SEC", "3.0")), MIN_STREAM_INTERVAL_SEC)
+STREAM_INTERVAL_SEC = max(
+    float(os.getenv("STREAM_INTERVAL_SEC", "3.0")), MIN_STREAM_INTERVAL_SEC
+)
 LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "15.0")), 1.0)
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
@@ -74,7 +77,7 @@ ALLOWED_ORIGINS: list[str] = (
 )
 
 LOG_RESPONSE_CACHE: OrderedDict[
-    tuple[int, int, tuple[str, ...], tuple[str, ...], str, bool],
+    tuple[Any, ...],
     tuple[float, dict[str, Any]],
 ] = OrderedDict()
 
@@ -92,7 +95,6 @@ IGNORED_PREFIXES: tuple[str, ...] = tuple(
     p.strip() for p in os.getenv("IGNORED_PREFIXES", "").split(",") if p.strip()
 )
 
-# GEO_CACHE 要素構造: {"resolved_at": float, "is_error": bool, "data": dict[str, Any]}
 GEO_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 GEO_SUCCESS_TTL = float(os.getenv("GEO_SUCCESS_TTL", str(60 * 60 * 24)))
 GEO_ERROR_TTL = float(os.getenv("GEO_ERROR_TTL", "20.0"))
@@ -179,12 +181,29 @@ SYSTEM_NOISE_PATTERNS = (
     '"message": "ping"',
 )
 
-# 改行・タブ以外の ASCII 制御文字や DEL / C1 制御文字を除去する正規表現
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        res = float(val)
+        return res if np.isfinite(res) else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def sanitize_display_text(text: Any, max_len: int = 1200) -> str:
-    """危険な制御文字を取り除き、表示長を制限した文字列を返す（フロント側で textContent / エスケープ描画前提）"""
     if text is None:
         return ""
     s = str(text)
@@ -201,15 +220,11 @@ def _is_japan_geo(geo: dict[str, Any]) -> bool:
     return cc == "JP" or ja_name == "日本" or en_name == "japan"
 
 
-# ==========================================
-# 機械学習モデル（Naive Bayes + Isolation Forest）
-# ==========================================
 CLASSIFIER_PIPELINE: Pipeline | None = None
 ANOMALY_MODEL: IsolationForest | None = None
 
 
 def init_ml_models() -> None:
-    """攻撃種別分類（MultinomialNB）と異常検知（IsolationForest）を初期化・学習"""
     global CLASSIFIER_PIPELINE, ANOMALY_MODEL
 
     train_samples = [
@@ -290,7 +305,6 @@ def classify_and_score(
     raw_request_line: str = "",
     header_count: int = 6,
 ) -> tuple[str, float, int]:
-    """攻撃カテゴリ・確信度・AI異常度スコア（0〜100%）を算出"""
     classifier, detector = _get_ready_models()
 
     signal_text = f"{event_type} {method} {path} {payload} {raw_request_line} {user_agent}".strip()[:4096]
@@ -310,7 +324,7 @@ def classify_and_score(
 
     special_chars = len(re.findall(r"['\";|<>$`\\{}\[\]\.\./]", f"{path} {payload} {raw_request_line}"[:4096]))
     features = np.array(
-        [[min(len(path), 4096), min(len(payload), 8192), max(0, min(header_count, 200)), special_chars]],
+        [[min(len(path), 4096), min(len(payload), 8192), max(0, min(_safe_int(header_count, 6), 200)), special_chars]],
         dtype=np.float64,
     )
     raw_score = float(detector.decision_function(features)[0])
@@ -321,9 +335,6 @@ def classify_and_score(
     return category, confidence, anomaly_pct
 
 
-# ==========================================
-# GeoIP バッチ解決（ip-api.com + 国旗・国名整形）
-# ==========================================
 def code_to_flag(country_code: str) -> str:
     code = (country_code or "").strip().upper()
     if len(code) != 2 or not code.isalpha():
@@ -405,8 +416,8 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
         "country_ja": ja_name,
         "country_code": cc,
         "flag": flag,
-        "lat": float(geo.get("lat", 0.0) or 0.0),
-        "lon": float(geo.get("lon", 0.0) or 0.0),
+        "lat": _safe_float(geo.get("lat", 0.0), 0.0),
+        "lon": _safe_float(geo.get("lon", 0.0), 0.0),
         "isp": sanitize_display_text(geo.get("isp") or "Unknown ISP", max_len=150),
     }
 
@@ -416,7 +427,7 @@ def _get_cached_geo(ip: str, now_mono: float) -> dict[str, Any] | None:
     if not entry:
         return None
     ttl = GEO_ERROR_TTL if entry.get("is_error") else GEO_SUCCESS_TTL
-    if (now_mono - float(entry.get("resolved_at", 0.0))) < ttl:
+    if (now_mono - _safe_float(entry.get("resolved_at", 0.0), 0.0)) < ttl:
         GEO_CACHE.move_to_end(ip)
         return _normalize_geo_entry(entry.get("data"), ip=ip)
     return None
@@ -434,7 +445,6 @@ def _set_cached_geo(ip: str, data: dict[str, Any], is_error: bool, now_mono: flo
 
 
 async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
-    """未キャッシュ（または期限切れ）のIPを ip-api.com/batch で最大100件ずつ一括解決"""
     now_mono = time.monotonic()
     unique_ips = list(dict.fromkeys(ips))
     result_map: dict[str, dict[str, Any]] = {}
@@ -495,6 +505,8 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
                         items = resp.json()
                         if isinstance(items, list):
                             for item in items:
+                                if not isinstance(item, dict):
+                                    continue
                                 q_ip = str(item.get("query") or "").strip()
                                 if not q_ip:
                                     continue
@@ -507,8 +519,8 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
                                         "country_ja": ja_name,
                                         "country_code": cc,
                                         "flag": code_to_flag(cc),
-                                        "lat": float(item.get("lat", 0.0) or 0.0),
-                                        "lon": float(item.get("lon", 0.0) or 0.0),
+                                        "lat": _safe_float(item.get("lat", 0.0), 0.0),
+                                        "lon": _safe_float(item.get("lon", 0.0), 0.0),
                                         "isp": item.get("isp") or "Unknown ISP",
                                     }
                                     _set_cached_geo(q_ip, data, is_error=False, now_mono=now_mono)
@@ -538,9 +550,6 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
     return result_map
 
 
-# ==========================================
-# ログパース・整形（Cloud Logging + Cloud Storage 両対応）
-# ==========================================
 def _extract_user_agent(data: dict[str, Any], http_req: dict[str, Any]) -> str:
     if data.get("user_agent"):
         return sanitize_display_text(data["user_agent"], max_len=300)
@@ -724,7 +733,7 @@ def _build_record_from_dict_and_meta(
     header_cnt = (
         len(headers_obj)
         if isinstance(headers_obj, dict)
-        else int(target_dict.get("header_count", 6))
+        else _safe_int(target_dict.get("header_count", 6), 6)
     )
     raw_text_for_filter = f"{event_type} {path} {payload_safe} {ua}"
 
@@ -801,7 +810,6 @@ def _obj_to_record(obj: Any, blob_updated: datetime, cutoff_dt: datetime) -> dic
 
 
 def _entry_to_record(entry: Any, cutoff_dt: datetime) -> dict[str, Any] | None:
-    """Cloud Logging の LogEntry をダッシュボード用レコードに変換"""
     ts_dt = _parse_timestamp_str(
         getattr(entry, "timestamp", None),
         datetime.now(timezone.utc),
@@ -884,8 +892,7 @@ def _parse_blob_text_to_records(
 
 
 def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
-    """LOG_PROJECTS の各 GCP プロジェクトから Cloud Logging エントリを取得"""
-    if limit <= 0:
+    if limit <= 0 or not LOG_PROJECTS:
         return []
 
     cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -893,11 +900,11 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
     full_filter = f"{time_filter} AND ({LOG_FILTER})" if LOG_FILTER else time_filter
 
     records: list[dict[str, Any]] = []
-    page_size = min(max(limit, 100), 1000)
+    per_project_limit = max(1, (limit + len(LOG_PROJECTS) - 1) // len(LOG_PROJECTS))
+    page_size = min(max(per_project_limit, 100), 1000)
 
     for project_id in LOG_PROJECTS:
-        remaining = limit - len(records)
-        if remaining <= 0:
+        if len(records) >= limit:
             break
         try:
             logging_client = gcp_logging.Client(project=project_id)
@@ -912,26 +919,26 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
                 if rec is not None:
                     records.append(rec)
                     count_for_proj += 1
-                    if count_for_proj >= remaining:
+                    if count_for_proj >= per_project_limit or len(records) >= limit:
                         break
         except Exception as exc:
             logger.warning("Failed to fetch logs from Cloud Logging project %s: %s", project_id, exc)
             continue
 
-    return records
+    return records[:limit]
 
 
 def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
-    """LOG_GCS_BUCKETS の各 GCS バケットからログを取得"""
-    if limit <= 0:
+    if limit <= 0 or not LOG_GCS_BUCKETS:
         return []
 
     storage_client = gcp_storage.Client(project=GCP_PROJECT_ID)
     records: list[dict[str, Any]] = []
+    per_bucket_limit = max(1, (limit + len(LOG_GCS_BUCKETS) - 1) // len(LOG_GCS_BUCKETS))
+    min_blob_time = cutoff_dt - timedelta(days=1)
 
     for bucket_name in LOG_GCS_BUCKETS:
-        remaining = limit - len(records)
-        if remaining <= 0:
+        if len(records) >= limit:
             break
         try:
             bucket = storage_client.bucket(bucket_name)
@@ -941,17 +948,20 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
             continue
 
         candidate_blobs = [
-            b for b in blobs if (b.updated is None or b.updated >= cutoff_dt - timedelta(days=1))
+            b for b in blobs if (b.updated is None or b.updated >= min_blob_time)
         ]
         candidate_blobs.sort(
             key=lambda b: b.updated or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
 
+        bucket_count = 0
         for blob in candidate_blobs[:MAX_GCS_BLOBS]:
-            remaining_in_bucket = limit - len(records)
-            if remaining_in_bucket <= 0:
+            if bucket_count >= per_bucket_limit or len(records) >= limit:
                 break
+            if blob.size is not None and blob.size > MAX_GCS_BLOB_BYTES:
+                logger.warning("Skipping oversized GCS blob %s/%s (%d bytes)", bucket_name, blob.name, blob.size)
+                continue
             try:
                 blob_updated = (
                     blob.updated
@@ -959,15 +969,17 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
                     else (blob.updated or now_dt).replace(tzinfo=timezone.utc)
                 )
                 text = blob.download_as_text(encoding="utf-8")
+                rem = min(per_bucket_limit - bucket_count, limit - len(records))
                 parsed_recs = _parse_blob_text_to_records(
-                    text, blob_updated, cutoff_dt, max_records=remaining_in_bucket
+                    text, blob_updated, cutoff_dt, max_records=rem
                 )
                 records.extend(parsed_recs)
+                bucket_count += len(parsed_recs)
             except Exception as exc:
                 logger.warning("Failed to read GCS blob %s/%s: %s", bucket_name, blob.name, exc)
                 continue
 
-    return records
+    return records[:limit]
 
 
 def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
@@ -976,17 +988,17 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     cutoff_dt = now_dt - timedelta(hours=hours)
     combined: list[dict[str, Any]] = []
 
-    if LOG_SOURCE_MODE in {"both", "logging"} and len(combined) < effective_limit:
+    if LOG_SOURCE_MODE in {"both", "logging"}:
         combined.extend(
             _fetch_cloud_logging_entries_sync(
-                cutoff_dt=cutoff_dt, limit=effective_limit - len(combined)
+                cutoff_dt=cutoff_dt, limit=effective_limit
             )
         )
 
-    if LOG_SOURCE_MODE in {"both", "gcs"} and len(combined) < effective_limit:
+    if LOG_SOURCE_MODE in {"both", "gcs"}:
         combined.extend(
             _fetch_gcs_entries_sync(
-                now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit - len(combined)
+                now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit
             )
         )
 
@@ -995,7 +1007,6 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
 
 
 async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
-    """Cloud Logging + Cloud Storage から実ログのみを取得"""
     try:
         records = await asyncio.to_thread(_fetch_all_entries_sync, hours, limit)
         return records, False
@@ -1004,9 +1015,6 @@ async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]]
         return [], False
 
 
-# ==========================================
-# GCP コスト計算（無料枠考慮）
-# ==========================================
 def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[str, Any]:
     scale_to_month = (24.0 * 30.0) / max(hours, 1)
     est_monthly_bytes = total_bytes * scale_to_month
@@ -1035,7 +1043,6 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
 
 
 async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
-    """集計・ML推論・GeoIP解決をまとめたペイロード生成関数（REST / SSE 共用・有界TTLキャッシュ付）"""
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     cache_key = (
         hours,
@@ -1043,7 +1050,11 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         tuple(LOG_PROJECTS),
         tuple(LOG_GCS_BUCKETS),
         LOG_SOURCE_MODE,
+        LOG_FILTER,
+        LOG_GCS_PREFIX,
         SKIP_JAPAN_IPS,
+        SKIP_CRAWLERS,
+        SKIP_SYSTEM_NOISE,
     )
     now_mono = time.monotonic()
     cached = LOG_RESPONSE_CACHE.get(cache_key)
@@ -1187,9 +1198,6 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     return payload
 
 
-# ==========================================
-# FastAPI アプリケーション（REST + SSE リアルタイム配信）
-# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_ml_models()
@@ -1198,7 +1206,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Honeypot Threat Intelligence Dashboard (Realtime)", lifespan=lifespan)
 
-# ALLOWED_ORIGINS が設定されている場合のみ CORS を有効化（ワイルドカード * は使わない）
 if ALLOWED_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
@@ -1250,8 +1257,6 @@ async def stream_stats(
     hours: int = Query(default=24, ge=1, le=720),
     limit: int = Query(default=1000, ge=1, le=MAX_ALLOWED_LIMIT),
 ) -> StreamingResponse:
-    """Server-Sent Events (SSE) によるリアルタイムストリーミング配信"""
-
     async def event_generator() -> AsyncGenerator[str, None]:
         while True:
             if await request.is_disconnected():
