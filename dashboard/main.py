@@ -10,6 +10,20 @@ import re
 import time
 from typing import Any, AsyncGenerator
 
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from google.cloud import bigquery as gcp_bigquery
+from google.cloud import logging as gcp_logging
+from google.cloud import storage as gcp_storage
+import httpx
+import numpy as np
+from sklearn.ensemble import IsolationForest
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
+
 
 def _load_dotenv_if_present() -> None:
     """カレントまたは main.py と同じフォルダの .env を読み込む（既存環境変数を優先）。"""
@@ -61,20 +75,6 @@ def _load_dotenv_if_present() -> None:
 
 _load_dotenv_if_present()
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from google.cloud import bigquery as gcp_bigquery
-from google.cloud import logging as gcp_logging
-from google.cloud import storage as gcp_storage
-import httpx
-import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.pipeline import Pipeline
-
 logger = std_logging.getLogger("honeypot-dashboard")
 
 # ==========================================
@@ -83,7 +83,7 @@ logger = std_logging.getLogger("honeypot-dashboard")
 MAX_ALLOWED_LIMIT = int(os.getenv("MAX_ALLOWED_LIMIT", "50000"))
 MAX_LOG_CACHE_ENTRIES = int(os.getenv("MAX_LOG_CACHE_ENTRIES", "128"))
 MAX_GEO_CACHE_ENTRIES = int(os.getenv("MAX_GEO_CACHE_ENTRIES", "10000"))
-MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(10 * 1024 * 1024)))  # 10MB
+MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(50 * 1024 * 1024)))
 MIN_STREAM_INTERVAL_SEC = 1.0
 
 # ==========================================
@@ -116,7 +116,7 @@ ENABLE_BIGQUERY_LOGS = os.getenv("ENABLE_BIGQUERY_LOGS", "true").lower() == "tru
 LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "all").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
-MAX_GCS_BLOBS = min(max(int(os.getenv("MAX_GCS_BLOBS", "200")), 1), 2000)
+MAX_GCS_BLOBS = min(max(int(os.getenv("MAX_GCS_BLOBS", "500")), 1), 5000)
 MAX_TIMELINE_EVENTS = min(
     max(int(os.getenv("MAX_TIMELINE_EVENTS", str(MAX_ALLOWED_LIMIT))), 1),
     MAX_ALLOWED_LIMIT,
@@ -127,6 +127,10 @@ STREAM_INTERVAL_SEC = max(
     float(os.getenv("STREAM_INTERVAL_SEC", "3.0")), MIN_STREAM_INTERVAL_SEC
 )
 LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "5.0")), 1.0)
+
+# 全JSON表示モード: 既定でフィルタ・切り詰めを無効化（環境変数で個別に有効化可能）
+SHOW_ALL_JSON = os.getenv("SHOW_ALL_JSON", "true").lower() == "true"
+MAX_DISPLAY_TEXT_LEN = int(os.getenv("MAX_DISPLAY_TEXT_LEN", "0"))  # 0以下で無制限
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
 ALLOWED_ORIGINS: list[str] = (
@@ -140,11 +144,12 @@ LOG_RESPONSE_CACHE: OrderedDict[
     tuple[float, dict[str, Any]],
 ] = OrderedDict()
 
-SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", "true").lower() == "true"
-SKIP_GOOGLE_LLC = os.getenv("SKIP_GOOGLE_LLC", "true").lower() == "true"
-SKIP_PRIVATE_IPS = os.getenv("SKIP_PRIVATE_IPS", "true").lower() == "true"
-SKIP_SYSTEM_NOISE = os.getenv("SKIP_SYSTEM_NOISE", "true").lower() == "true"
-SKIP_JAPAN_IPS = os.getenv("SKIP_JAPAN_IPS", "true").lower() == "true"
+_default_skip = "false" if SHOW_ALL_JSON else "true"
+SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", _default_skip).lower() == "true"
+SKIP_GOOGLE_LLC = os.getenv("SKIP_GOOGLE_LLC", _default_skip).lower() == "true"
+SKIP_PRIVATE_IPS = os.getenv("SKIP_PRIVATE_IPS", _default_skip).lower() == "true"
+SKIP_SYSTEM_NOISE = os.getenv("SKIP_SYSTEM_NOISE", _default_skip).lower() == "true"
+SKIP_JAPAN_IPS = os.getenv("SKIP_JAPAN_IPS", _default_skip).lower() == "true"
 
 _RAW_IGNORED_IPS = os.getenv("IGNORED_IPS", "").strip()
 IGNORED_IPS: set[str] = (
@@ -215,12 +220,7 @@ CRAWLER_UA_KEYWORDS = (
     "googlehc",
 )
 
-SYSTEM_NOISE_EVENTS = {
-    "heartbeat",
-    "start",
-    "stop",
-    "ping",
-}
+SYSTEM_NOISE_EVENTS = {"heartbeat", "start", "stop", "ping"}
 
 SYSTEM_NOISE_PATTERNS = (
     "gce agent stopped",
@@ -268,14 +268,43 @@ def _safe_int(val: Any, default: int = 0) -> int:
         return default
 
 
-def sanitize_display_text(text: Any, max_len: int = 1200) -> str:
+def sanitize_display_text(text: Any, max_len: int | None = None) -> str:
     if text is None:
         return ""
-    s = str(text)
-    s = _CONTROL_CHAR_RE.sub("", s)
-    if len(s) > max_len:
-        return s[:max_len] + "…(truncated)"
+    s = _CONTROL_CHAR_RE.sub("", str(text))
+    limit_len = MAX_DISPLAY_TEXT_LEN if max_len is None else max_len
+    if limit_len > 0 and len(s) > limit_len:
+        return s[:limit_len] + "…(truncated)"
     return s
+
+
+def _safe_json_dumps(obj: Any, indent: int | None = None) -> str:
+    raw = json.dumps(obj, ensure_ascii=False, default=str, indent=indent)
+    return _CONTROL_CHAR_RE.sub("", raw)
+
+
+def code_to_flag(country_code: str) -> str:
+    code = (country_code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "🌐"
+    return "".join(chr(127397 + ord(c)) for c in code)
+
+
+def is_public_ipv4(ip: str) -> bool:
+    s = (ip or "").strip()
+    if s.startswith("::ffff:"):
+        s = s.removeprefix("::ffff:")
+    if not s or s.lower() in {"127.0.0.1", "0.0.0.0", "unknown", "private", "localhost"}:
+        return False
+    if s.startswith(("10.", "192.168.", "169.254.")):
+        return False
+    if s.startswith("172."):
+        parts = s.split(".")
+        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            return False
+    if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", s):
+        return False
+    return all(0 <= int(octet) <= 255 for octet in s.split("."))
 
 
 def _is_japan_geo(geo: dict[str, Any]) -> bool:
@@ -351,16 +380,13 @@ def init_ml_models() -> None:
         ("CreateSink honeypot-http-to-bq", "Automated Recon / Scanner"),
     ]
 
-    texts = [x[0] for x in train_samples]
-    labels = [x[1] for x in train_samples]
-
     pipeline = Pipeline(
         [
             ("tfidf", TfidfVectorizer(ngram_range=(1, 2), lowercase=True)),
             ("nb", MultinomialNB(alpha=0.3)),
         ]
     )
-    pipeline.fit(texts, labels)
+    pipeline.fit([x[0] for x in train_samples], [x[1] for x in train_samples])
     CLASSIFIER_PIPELINE = pipeline
 
     baseline_features = np.array(
@@ -402,9 +428,8 @@ def classify_and_score(
 
     signal_text = f"{event_type} {method} {path} {payload} {raw_request_line} {user_agent}".strip()[:4096]
     probs = classifier.predict_proba([signal_text])[0]
-    classes = classifier.classes_
     best_idx = int(np.argmax(probs))
-    category = str(classes[best_idx])
+    category = str(classifier.classes_[best_idx])
     confidence = round(float(probs[best_idx]) * 100.0, 1)
 
     lower_sig = signal_text.lower()
@@ -449,34 +474,10 @@ def classify_and_score(
     return category, confidence, anomaly_pct
 
 
-def code_to_flag(country_code: str) -> str:
-    code = (country_code or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
-        return "🌐"
-    return "".join(chr(127397 + ord(c)) for c in code)
-
-
-def is_public_ipv4(ip: str) -> bool:
-    s = (ip or "").strip()
-    if s.startswith("::ffff:"):
-        s = s.removeprefix("::ffff:")
-    if not s or s.lower() in {"127.0.0.1", "0.0.0.0", "unknown", "private", "localhost"}:
-        return False
-    if s.startswith(("10.", "192.168.", "169.254.")):
-        return False
-    if s.startswith("172."):
-        parts = s.split(".")
-        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            return False
-    if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", s):
-        return False
-    return all(0 <= int(octet) <= 255 for octet in s.split("."))
-
-
 def _extract_first_ipv4(text: Any) -> str | None:
     if not text:
         return None
-    s = str(text)[:2048]
+    s = str(text)[:4096]
     for token in re.split(r"[,\s]+", s):
         candidate = token.strip().strip('"').strip("'")
         if candidate.startswith("::ffff:"):
@@ -484,9 +485,7 @@ def _extract_first_ipv4(text: Any) -> str | None:
         if is_public_ipv4(candidate):
             return candidate
     m = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", s)
-    if m and is_public_ipv4(m.group(0)):
-        return m.group(0)
-    return None
+    return m.group(0) if m and is_public_ipv4(m.group(0)) else None
 
 
 def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[str, Any]:
@@ -495,8 +494,7 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
     en_name = sanitize_display_text(geo.get("country") or "", max_len=100).strip()
     ja_name = sanitize_display_text(geo.get("country_ja") or "", max_len=100).strip()
 
-    ip_clean = (ip or "").strip().lower()
-    if ip_clean == "private":
+    if (ip or "").strip().lower() == "private":
         return {
             "country": "Private / Local",
             "country_ja": "プライベート",
@@ -509,10 +507,8 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
 
     if cc in COUNTRY_JA_MAP:
         ja_name = COUNTRY_JA_MAP[cc]
-    elif not ja_name and en_name:
-        ja_name = en_name
     elif not ja_name:
-        ja_name = "Unknown"
+        ja_name = en_name or "Unknown"
 
     if not en_name:
         en_name = ja_name
@@ -522,14 +518,7 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
     if computed_flag != "🌐":
         flag = computed_flag
     elif not flag or flag == "🌐":
-        if en_name in {"Private / Local", "ローカル", "プライベート"} or ja_name in {
-            "Private / Local",
-            "ローカル",
-            "プライベート",
-        }:
-            flag = "🏠"
-        else:
-            flag = "🌐"
+        flag = "🏠" if {en_name, ja_name} & {"Private / Local", "ローカル", "プライベート"} else "🌐"
 
     return {
         "country": en_name,
@@ -566,11 +555,10 @@ def _set_cached_geo(ip: str, data: dict[str, Any], is_error: bool, now_mono: flo
 
 async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
     now_mono = time.monotonic()
-    unique_ips = list(dict.fromkeys(ips))
     result_map: dict[str, dict[str, Any]] = {}
     uncached: list[str] = []
 
-    for ip in unique_ips:
+    for ip in dict.fromkeys(ips):
         cached = _get_cached_geo(ip, now_mono)
         if cached is not None:
             result_map[ip] = cached
@@ -603,16 +591,12 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
             result_map[ip] = _normalize_geo_entry(data, ip=ip)
 
     if uncached:
-        batches = [uncached[i : i + 100] for i in range(0, len(uncached), 100)]
         resolved_in_batch: set[str] = set()
-
         async with httpx.AsyncClient(timeout=8.0) as client:
-            for batch in batches:
+            for i in range(0, len(uncached), 100):
+                batch = uncached[i : i + 100]
                 req_body = [
-                    {
-                        "query": ip,
-                        "fields": "status,country,countryCode,lat,lon,isp,query",
-                    }
+                    {"query": ip, "fields": "status,country,countryCode,lat,lon,isp,query"}
                     for ip in batch
                 ]
                 for attempt in range(2):
@@ -628,15 +612,12 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
                                 if not isinstance(item, dict):
                                     continue
                                 q_ip = str(item.get("query") or "").strip()
-                                if not q_ip:
-                                    continue
-                                if item.get("status") == "success":
+                                if q_ip and item.get("status") == "success":
                                     cc = str(item.get("countryCode") or "").strip().upper()
                                     en_name = str(item.get("country") or "").strip() or "Unknown"
-                                    ja_name = COUNTRY_JA_MAP.get(cc, en_name)
                                     data = {
                                         "country": en_name,
-                                        "country_ja": ja_name,
+                                        "country_ja": COUNTRY_JA_MAP.get(cc, en_name),
                                         "country_code": cc,
                                         "flag": code_to_flag(cc),
                                         "lat": _safe_float(item.get("lat", 0.0), 0.0),
@@ -672,19 +653,18 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
 
 def _extract_user_agent(data: dict[str, Any], http_req: dict[str, Any]) -> str:
     if data.get("user_agent"):
-        return sanitize_display_text(data["user_agent"], max_len=300)
+        return sanitize_display_text(data["user_agent"], max_len=500)
     headers = data.get("headers")
     if isinstance(headers, dict):
         for k, v in headers.items():
             if str(k).lower() == "user-agent":
-                if isinstance(v, list) and v:
-                    return sanitize_display_text(v[0], max_len=300)
-                return sanitize_display_text(v or "", max_len=300)
+                val = v[0] if isinstance(v, list) and v else (v or "")
+                return sanitize_display_text(val, max_len=500)
     req_meta = data.get("requestMetadata")
     if isinstance(req_meta, dict) and req_meta.get("callerSuppliedUserAgent"):
-        return sanitize_display_text(req_meta["callerSuppliedUserAgent"], max_len=300)
+        return sanitize_display_text(req_meta["callerSuppliedUserAgent"], max_len=500)
     if http_req.get("userAgent"):
-        return sanitize_display_text(http_req["userAgent"], max_len=300)
+        return sanitize_display_text(http_req["userAgent"], max_len=500)
     return ""
 
 
@@ -693,7 +673,7 @@ def _parse_json_dict(raw_val: Any) -> dict[str, Any] | None:
         return raw_val
     if isinstance(raw_val, str):
         stripped = raw_val.strip()
-        if len(stripped) <= 200_000 and stripped.startswith("{") and stripped.endswith("}"):
+        if stripped.startswith("{") and stripped.endswith("}"):
             try:
                 parsed = json.loads(stripped)
                 if isinstance(parsed, dict):
@@ -723,6 +703,11 @@ def _should_skip_record(
     path: str,
     raw_text: str,
 ) -> bool:
+    if SHOW_ALL_JSON and not any(
+        [SKIP_PRIVATE_IPS, SKIP_SYSTEM_NOISE, SKIP_CRAWLERS, SKIP_GOOGLE_LLC, IGNORED_IPS, IGNORED_PREFIXES]
+    ):
+        return False
+
     if _is_ignored_ip(src_ip):
         return True
 
@@ -764,8 +749,7 @@ def _extract_ip_from_dict(d: dict[str, Any], http_req: dict[str, Any]) -> str:
         "x_forwarded_for",
         "ip",
     ):
-        val = d.get(key)
-        extracted = _extract_first_ipv4(val)
+        extracted = _extract_first_ipv4(d.get(key))
         if extracted:
             return extracted
 
@@ -784,20 +768,15 @@ def _extract_ip_from_dict(d: dict[str, Any], http_req: dict[str, Any]) -> str:
         if extracted:
             return extracted
 
-    http_ip = _extract_first_ipv4(http_req.get("remoteIp"))
-    if http_ip:
-        return http_ip
-
-    return "private"
+    return _extract_first_ipv4(http_req.get("remoteIp")) or "private"
 
 
 def _parse_timestamp_str(val: Any, fallback_dt: datetime) -> datetime:
     if isinstance(val, datetime):
         return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
     if isinstance(val, str) and val.strip():
-        s = val.strip().replace("Z", "+00:00")
         try:
-            dt = datetime.fromisoformat(s)
+            dt = datetime.fromisoformat(val.strip().replace("Z", "+00:00"))
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             pass
@@ -810,6 +789,8 @@ def _build_record_from_dict_and_meta(
     ts_dt: datetime,
     fallback_ip: str = "private",
     fallback_event: str = "request",
+    source_name: str = "unknown",
+    envelope_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     src_ip = _extract_ip_from_dict(target_dict, http_req)
     if src_ip == "private" and fallback_ip and fallback_ip != "private":
@@ -826,17 +807,17 @@ def _build_record_from_dict_and_meta(
         or target_dict.get("event_type")
         or target_dict.get("methodName")
         or fallback_event,
-        max_len=80,
+        max_len=120,
     ).lower()
     method = sanitize_display_text(
         target_dict.get("method") or http_req.get("requestMethod") or "GET",
-        max_len=20,
+        max_len=40,
     )
     path = sanitize_display_text(
         target_dict.get("path") or http_req.get("requestUrl") or "/",
-        max_len=500,
+        max_len=1000,
     )
-    raw_req_line = sanitize_display_text(target_dict.get("raw_request_line") or "", max_len=500).strip()
+    raw_req_line = sanitize_display_text(target_dict.get("raw_request_line") or "", max_len=1000).strip()
     body_val = (
         target_dict.get("payload")
         or target_dict.get("body")
@@ -845,14 +826,21 @@ def _build_record_from_dict_and_meta(
     )
     headers_obj = target_dict.get("headers")
 
-    full_json_str = json.dumps(target_dict, ensure_ascii=False, default=str)
+    full_json_obj: dict[str, Any] = dict(target_dict)
+    if envelope_dict and envelope_dict is not target_dict:
+        full_json_obj["_envelope"] = envelope_dict
+
+    full_json_str = _safe_json_dumps(full_json_obj, indent=None)
+    pretty_json_str = _safe_json_dumps(full_json_obj, indent=2)
+
     if raw_req_line or body_val:
         parts = [p for p in (raw_req_line, str(body_val) if body_val else "") if p]
         payload_str = f"{' | '.join(parts)} || RAW: {full_json_str}"
     else:
         payload_str = full_json_str
 
-    payload_safe = sanitize_display_text(payload_str, max_len=1200)
+    payload_safe = sanitize_display_text(payload_str)
+    pretty_json_safe = sanitize_display_text(pretty_json_str)
     ua = _extract_user_agent(target_dict, http_req)
     header_cnt = (
         len(headers_obj)
@@ -866,19 +854,28 @@ def _build_record_from_dict_and_meta(
 
     return {
         "timestamp": ts_dt.isoformat(),
+        "source": source_name,
         "event_type": event_type,
         "ip": src_ip,
         "method": method,
         "path": path,
         "payload": payload_safe,
+        "raw_json": full_json_obj,
+        "raw_json_str": payload_safe,
+        "raw_json_pretty": pretty_json_safe,
         "raw_request_line": raw_req_line,
         "user_agent": ua,
         "header_count": header_cnt,
-        "bytes": len(raw_text_for_filter.encode("utf-8")) + 160,
+        "bytes": len(full_json_str.encode("utf-8")) + 160,
     }
 
 
-def _obj_to_record(obj: Any, blob_updated: datetime, cutoff_dt: datetime) -> dict[str, Any] | None:
+def _obj_to_record(
+    obj: Any,
+    blob_updated: datetime,
+    cutoff_dt: datetime,
+    source_name: str = "gcs",
+) -> dict[str, Any] | None:
     if isinstance(obj, dict):
         raw_http_req = obj.get("httpRequest")
         http_req: dict[str, Any] = raw_http_req if isinstance(raw_http_req, dict) else {}
@@ -900,30 +897,33 @@ def _obj_to_record(obj: Any, blob_updated: datetime, cutoff_dt: datetime) -> dic
         if ts_dt < cutoff_dt:
             return None
 
-        fallback_ip = _extract_ip_from_dict(obj, http_req)
-        fallback_event = str(obj.get("event") or obj.get("methodName") or "request").lower()
         return _build_record_from_dict_and_meta(
             target_dict=target_dict,
             http_req=http_req,
             ts_dt=ts_dt,
-            fallback_ip=fallback_ip,
-            fallback_event=fallback_event,
+            fallback_ip=_extract_ip_from_dict(obj, http_req),
+            fallback_event=str(obj.get("event") or obj.get("methodName") or "request").lower(),
+            source_name=source_name,
+            envelope_dict=obj if target_dict is not obj else None,
         )
 
-    if isinstance(obj, str) and obj.strip():
-        if blob_updated < cutoff_dt:
-            return None
-        line = sanitize_display_text(obj.strip(), max_len=1200)
+    if isinstance(obj, str) and obj.strip() and blob_updated >= cutoff_dt:
+        line = sanitize_display_text(obj.strip())
         src_ip = _extract_first_ipv4(line) or "private"
         if _should_skip_record(src_ip, "text", "", "/", line):
             return None
+        raw_obj = {"event": "text", "message": line, "timestamp": blob_updated.isoformat()}
         return {
             "timestamp": blob_updated.isoformat(),
+            "source": source_name,
             "event_type": "text",
             "ip": src_ip,
             "method": "GET",
             "path": "/",
             "payload": line,
+            "raw_json": raw_obj,
+            "raw_json_str": _safe_json_dumps(raw_obj),
+            "raw_json_pretty": _safe_json_dumps(raw_obj, indent=2),
             "raw_request_line": "",
             "user_agent": "",
             "header_count": 6,
@@ -933,11 +933,8 @@ def _obj_to_record(obj: Any, blob_updated: datetime, cutoff_dt: datetime) -> dic
     return None
 
 
-def _entry_to_record(entry: Any, cutoff_dt: datetime) -> dict[str, Any] | None:
-    ts_dt = _parse_timestamp_str(
-        getattr(entry, "timestamp", None),
-        datetime.now(timezone.utc),
-    )
+def _entry_to_record(entry: Any, cutoff_dt: datetime, source_name: str = "logging") -> dict[str, Any] | None:
+    ts_dt = _parse_timestamp_str(getattr(entry, "timestamp", None), datetime.now(timezone.utc))
     if ts_dt < cutoff_dt:
         return None
 
@@ -962,13 +959,21 @@ def _entry_to_record(entry: Any, cutoff_dt: datetime) -> dict[str, Any] | None:
                 fallback_ip = found
                 break
 
-    fallback_event = str(getattr(entry, "log_name", None) or "request").lower()
+    envelope_meta: dict[str, Any] = {
+        "log_name": getattr(entry, "log_name", None),
+        "insert_id": getattr(entry, "insert_id", None),
+        "severity": str(getattr(entry, "severity", "") or ""),
+        "labels": labels if isinstance(labels, dict) else {},
+    }
+
     return _build_record_from_dict_and_meta(
         target_dict=target_dict,
         http_req=http_req,
         ts_dt=ts_dt,
         fallback_ip=fallback_ip,
-        fallback_event=fallback_event,
+        fallback_event=str(getattr(entry, "log_name", None) or "request").lower(),
+        source_name=source_name,
+        envelope_dict=envelope_meta,
     )
 
 
@@ -977,19 +982,19 @@ def _parse_blob_text_to_records(
     blob_updated: datetime,
     cutoff_dt: datetime,
     max_records: int,
+    source_name: str = "gcs",
 ) -> list[dict[str, Any]]:
     stripped = content.strip()
     if not stripped or max_records <= 0:
         return []
 
     out: list[dict[str, Any]] = []
-
     if stripped.startswith("["):
         try:
             arr = json.loads(stripped)
             if isinstance(arr, list):
                 for item in arr:
-                    rec = _obj_to_record(item, blob_updated, cutoff_dt)
+                    rec = _obj_to_record(item, blob_updated, cutoff_dt, source_name=source_name)
                     if rec is not None:
                         out.append(rec)
                         if len(out) >= max_records:
@@ -1004,9 +1009,9 @@ def _parse_blob_text_to_records(
             continue
         try:
             parsed = json.loads(line_s)
-            rec = _obj_to_record(parsed, blob_updated, cutoff_dt)
+            rec = _obj_to_record(parsed, blob_updated, cutoff_dt, source_name=source_name)
         except json.JSONDecodeError:
-            rec = _obj_to_record(line_s, blob_updated, cutoff_dt)
+            rec = _obj_to_record(line_s, blob_updated, cutoff_dt, source_name=source_name)
         if rec is not None:
             out.append(rec)
             if len(out) >= max_records:
@@ -1039,7 +1044,7 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
             )
             count_for_proj = 0
             for entry in entries:
-                rec = _entry_to_record(entry, cutoff_dt)
+                rec = _entry_to_record(entry, cutoff_dt, source_name=f"logging:{project_id}")
                 if rec is not None:
                     records.append(rec)
                     count_for_proj += 1
@@ -1047,7 +1052,6 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
                         break
         except Exception as exc:
             logger.warning("Failed to fetch logs from Cloud Logging project %s: %s", project_id, exc)
-            continue
 
     return records[:limit]
 
@@ -1071,9 +1075,7 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
             logger.warning("Failed to list GCS blobs in target %s: %s", bucket_name, exc)
             continue
 
-        candidate_blobs = [
-            b for b in blobs if (b.updated is None or b.updated >= min_blob_time)
-        ]
+        candidate_blobs = [b for b in blobs if (b.updated is None or b.updated >= min_blob_time)]
         candidate_blobs.sort(
             key=lambda b: b.updated or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
@@ -1095,13 +1097,16 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
                 text = blob.download_as_text(encoding="utf-8")
                 rem = min(per_bucket_limit - bucket_count, limit - len(records))
                 parsed_recs = _parse_blob_text_to_records(
-                    text, blob_updated, cutoff_dt, max_records=rem
+                    text,
+                    blob_updated,
+                    cutoff_dt,
+                    max_records=rem,
+                    source_name=f"gcs:{bucket_name}/{blob.name}",
                 )
                 records.extend(parsed_recs)
                 bucket_count += len(parsed_recs)
             except Exception as exc:
                 logger.warning("Failed to read GCS blob %s/%s: %s", bucket_name, blob.name, exc)
-                continue
 
     return records[:limit]
 
@@ -1129,15 +1134,13 @@ LIMIT {safe_limit}
     records: list[dict[str, Any]] = []
     try:
         bq_client = gcp_bigquery.Client(project=BQ_PROJECT_ID)
-        rows = bq_client.query(query).result()
-        for row in rows:
+        for row in bq_client.query(query).result():
             ts_dt = _parse_timestamp_str(getattr(row, "timestamp", None), datetime.now(timezone.utc))
             if ts_dt < cutoff_dt:
                 continue
 
             jp = _parse_json_dict(getattr(row, "jsonPayload", None))
             tp = getattr(row, "textPayload", None)
-
             if jp:
                 target_dict: dict[str, Any] = jp
             elif isinstance(tp, str) and tp.strip():
@@ -1161,6 +1164,7 @@ LIMIT {safe_limit}
                 ts_dt=ts_dt,
                 fallback_ip="private",
                 fallback_event=str(target_dict.get("event") or "request").lower(),
+                source_name=f"bigquery:{BQ_TABLE_ID}",
             )
             if rec is not None:
                 records.append(rec)
@@ -1179,34 +1183,22 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     combined: list[dict[str, Any]] = []
 
     if LOG_SOURCE_MODE in {"all", "both", "logging"}:
-        combined.extend(
-            _fetch_cloud_logging_entries_sync(
-                cutoff_dt=cutoff_dt, limit=effective_limit
-            )
-        )
-
+        combined.extend(_fetch_cloud_logging_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
     if LOG_SOURCE_MODE in {"all", "both", "gcs"}:
-        combined.extend(
-            _fetch_gcs_entries_sync(
-                now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit
-            )
-        )
-
+        combined.extend(_fetch_gcs_entries_sync(now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit))
     if LOG_SOURCE_MODE in {"all", "bigquery"}:
-        combined.extend(
-            _fetch_bigquery_entries_sync(
-                cutoff_dt=cutoff_dt, limit=effective_limit
-            )
-        )
+        combined.extend(_fetch_bigquery_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
 
     deduped: dict[str, dict[str, Any]] = {}
-    for rec in combined:
-        key = f"{rec['timestamp']}|{rec['ip']}|{rec['method']}|{rec['path']}|{rec['payload'][:120]}"
-        if key not in deduped:
-            deduped[key] = rec
+    for idx, rec in enumerate(combined):
+        key = (
+            f"{rec['timestamp']}|{rec['source']}|{rec['ip']}|{rec['method']}|{rec['path']}|{idx}"
+            if SHOW_ALL_JSON
+            else f"{rec['timestamp']}|{rec['ip']}|{rec['method']}|{rec['path']}|{rec['payload'][:120]}"
+        )
+        deduped.setdefault(key, rec)
 
-    ordered = sorted(deduped.values(), key=lambda r: r["timestamp"], reverse=True)
-    return ordered[:effective_limit]
+    return sorted(deduped.values(), key=lambda r: r["timestamp"], reverse=True)[:effective_limit]
 
 
 async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -1234,11 +1226,9 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
     run_quota_pct = min(100.0, round((est_monthly_reqs / free_run_reqs) * 100.0, 2))
 
     total_usd = round(logging_usd + run_usd, 4)
-    total_jpy = round(total_usd * USD_TO_JPY, 1)
-
     return {
         "estimated_monthly_usd": total_usd,
-        "estimated_monthly_jpy": total_jpy,
+        "estimated_monthly_jpy": round(total_usd * USD_TO_JPY, 1),
         "logging_free_tier_pct": logging_quota_pct,
         "cloud_run_free_tier_pct": run_quota_pct,
         "analyzed_bytes": total_bytes,
@@ -1257,6 +1247,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         LOG_SOURCE_MODE,
         LOG_FILTER,
         LOG_GCS_PREFIX,
+        SHOW_ALL_JSON,
+        MAX_DISPLAY_TEXT_LEN,
         SKIP_JAPAN_IPS,
         SKIP_CRAWLERS,
         SKIP_GOOGLE_LLC,
@@ -1272,13 +1264,13 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             return cached_payload
 
     raw_records, is_demo_mode = await fetch_logs_async(hours=hours, limit=effective_limit)
-    ips = [r["ip"] for r in raw_records]
-    geo_map = await resolve_geoip_batch(ips)
+    geo_map = await resolve_geoip_batch([r["ip"] for r in raw_records])
 
     category_counts: dict[str, int] = {}
     country_counts: dict[str, dict[str, Any]] = {}
     ip_counts: dict[str, dict[str, Any]] = {}
     timeline_events: list[dict[str, Any]] = []
+    all_json_records: list[dict[str, Any]] = []
     map_points_dict: dict[str, dict[str, Any]] = {}
 
     total_bytes = 0
@@ -1313,8 +1305,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         category_counts[category] = category_counts.get(category, 0) + 1
 
         c_key = f"{geo['flag']} {display_country}"
-        if c_key not in country_counts:
-            country_counts[c_key] = {
+        country_counts.setdefault(
+            c_key,
+            {
                 "label": c_key,
                 "flag": geo["flag"],
                 "country": display_country,
@@ -1322,11 +1315,12 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "country_en": geo["country"],
                 "country_code": geo["country_code"],
                 "count": 0,
-            }
-        country_counts[c_key]["count"] += 1
+            },
+        )["count"] += 1
 
-        if ip not in ip_counts:
-            ip_counts[ip] = {
+        ip_counts.setdefault(
+            ip,
+            {
                 "ip": ip,
                 "flag": geo["flag"],
                 "country": display_country,
@@ -1336,12 +1330,13 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "isp": geo["isp"],
                 "count": 0,
                 "top_category": category,
-            }
-        ip_counts[ip]["count"] += 1
+            },
+        )["count"] += 1
 
         if geo["lat"] != 0.0 or geo["lon"] != 0.0:
-            if ip not in map_points_dict:
-                map_points_dict[ip] = {
+            map_points_dict.setdefault(
+                ip,
+                {
                     "ip": ip,
                     "lat": geo["lat"],
                     "lon": geo["lon"],
@@ -1353,42 +1348,54 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                     "isp": geo["isp"],
                     "count": 0,
                     "category": category,
-                }
-            map_points_dict[ip]["count"] += 1
+                },
+            )["count"] += 1
 
         if len(timeline_events) < min(MAX_TIMELINE_EVENTS, effective_limit):
-            safe_path = sanitize_display_text(rec["path"], max_len=500)
-            safe_payload = sanitize_display_text(rec["payload"], max_len=1200)
-            timeline_events.append(
+            safe_path = sanitize_display_text(rec["path"])
+            safe_payload = sanitize_display_text(rec["payload"])
+            safe_pretty = sanitize_display_text(rec.get("raw_json_pretty") or safe_payload)
+            event_id = sanitize_display_text(
+                f"{rec['timestamp']}_{len(timeline_events)}_{ip}_{rec['method']}_{safe_path[:120]}"
+            )
+            event_obj = {
+                "id": event_id,
+                "timestamp": rec["timestamp"],
+                "source": rec.get("source", "unknown"),
+                "ip": ip,
+                "flag": geo["flag"],
+                "country": display_country,
+                "country_ja": geo["country_ja"],
+                "country_en": geo["country"],
+                "country_code": geo["country_code"],
+                "isp": geo["isp"],
+                "method": rec["method"],
+                "path": safe_path,
+                "payload": safe_payload,
+                "raw_json": rec.get("raw_json"),
+                "raw_json_pretty": safe_pretty,
+                "category": category,
+                "confidence": confidence,
+                "anomaly_score": anomaly_score,
+            }
+            timeline_events.append(event_obj)
+            all_json_records.append(
                 {
-                    "id": sanitize_display_text(
-                        f"{rec['timestamp']}_{ip}_{rec['method']}_{safe_path}",
-                        max_len=600,
-                    ),
+                    "id": event_id,
                     "timestamp": rec["timestamp"],
+                    "source": rec.get("source", "unknown"),
                     "ip": ip,
-                    "flag": geo["flag"],
                     "country": display_country,
-                    "country_ja": geo["country_ja"],
-                    "country_en": geo["country"],
-                    "country_code": geo["country_code"],
-                    "isp": geo["isp"],
-                    "method": rec["method"],
-                    "path": safe_path,
-                    "payload": safe_payload,
                     "category": category,
-                    "confidence": confidence,
-                    "anomaly_score": anomaly_score,
+                    "json": rec.get("raw_json"),
+                    "json_pretty": safe_pretty,
                 }
             )
-
-    top_countries = sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10]
-    top_ips = sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10]
-    cost_info = calculate_gcp_costs(len(timeline_events), total_bytes, hours)
 
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "is_demo_mode": is_demo_mode,
+        "show_all_json": SHOW_ALL_JSON,
         "summary": {
             "total_attacks": len(timeline_events),
             "unique_ips": len(ip_counts),
@@ -1396,11 +1403,12 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             "high_anomaly_count": high_anomaly_count,
         },
         "categories": category_counts,
-        "top_countries": top_countries,
-        "top_ips": top_ips,
+        "top_countries": sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
+        "top_ips": sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "map_points": list(map_points_dict.values()),
         "timeline": timeline_events,
-        "cost": cost_info,
+        "all_json_records": all_json_records,
+        "cost": calculate_gcp_costs(len(timeline_events), total_bytes, hours),
     }
 
     LOG_RESPONSE_CACHE[cache_key] = (time.monotonic(), payload)
@@ -1450,9 +1458,182 @@ def _resolve_static_file(filename: str) -> Path:
     return candidate
 
 
+def _render_all_json_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>All JSON Logs Viewer</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }
+    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; background: #1e293b; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    input, button, select { background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+    button { cursor: pointer; background: #2563eb; border-color: #2563eb; }
+    button:hover { background: #1d4ed8; }
+    .meta { font-size: 12px; color: #94a3b8; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    .card-head { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; font-size: 12px; color: #93c5fd; margin-bottom: 8px; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; background: #020617; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #f1f5f9; max-height: 520px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <strong>All JSON Logs Viewer</strong>
+      <div class="meta" id="status-bar">Connecting...</div>
+    </div>
+    <div class="controls">
+      <input id="filter-input" type="text" placeholder="キーワード検索 (IP, path, source, JSON...)" />
+      <select id="hours-select">
+        <option value="1">1h</option>
+        <option value="6">6h</option>
+        <option value="24" selected>24h</option>
+        <option value="72">72h</option>
+        <option value="168">7d</option>
+      </select>
+      <button id="refresh-btn" type="button">今すぐ更新</button>
+      <button id="toggle-stream-btn" type="button">ストリーム停止</button>
+    </div>
+  </header>
+  <main id="json-list"></main>
+  <script>
+    const listEl = document.getElementById("json-list");
+    const statusEl = document.getElementById("status-bar");
+    const filterEl = document.getElementById("filter-input");
+    const hoursEl = document.getElementById("hours-select");
+    const refreshBtn = document.getElementById("refresh-btn");
+    const toggleStreamBtn = document.getElementById("toggle-stream-btn");
+
+    let latestRecords = [];
+    let eventSource = null;
+    let streaming = true;
+
+    function renderRecords(records, updatedAt) {
+      const q = (filterEl.value || "").trim().toLowerCase();
+      const filtered = q
+        ? records.filter((r) => {
+            const hay = `${r.timestamp || ""} ${r.source || ""} ${r.ip || ""} ${r.country || ""} ${r.category || ""} ${r.json_pretty || ""}`.toLowerCase();
+            return hay.includes(q);
+          })
+        : records;
+
+      statusEl.textContent = `Updated: ${updatedAt || "-"} | Showing: ${filtered.length} / ${records.length} JSON records`;
+      listEl.innerHTML = "";
+
+      const frag = document.createDocumentFragment();
+      for (const rec of filtered) {
+        const card = document.createElement("section");
+        card.className = "card";
+
+        const head = document.createElement("div");
+        head.className = "card-head";
+        head.textContent = `[${rec.timestamp || ""}] source=${rec.source || ""} | ip=${rec.ip || ""} (${rec.country || ""}) | ${rec.category || ""}`;
+
+        const pre = document.createElement("pre");
+        pre.textContent = rec.json_pretty || JSON.stringify(rec.json || {}, null, 2);
+
+        card.appendChild(head);
+        card.appendChild(pre);
+        frag.appendChild(card);
+      }
+      listEl.appendChild(frag);
+    }
+
+    async function fetchOnce() {
+      const hours = encodeURIComponent(hoursEl.value || "24");
+      const resp = await fetch(`/api/json/all?hours=${hours}&limit=50000`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      latestRecords = Array.isArray(data.records) ? data.records : [];
+      renderRecords(latestRecords, data.updated_at);
+    }
+
+    function connectStream() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (!streaming) return;
+      const hours = encodeURIComponent(hoursEl.value || "24");
+      eventSource = new EventSource(`/api/stream?hours=${hours}&limit=50000`);
+      eventSource.addEventListener("stats", (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          latestRecords = Array.isArray(data.all_json_records)
+            ? data.all_json_records
+            : (data.timeline || []).map((t) => ({
+                id: t.id,
+                timestamp: t.timestamp,
+                source: t.source,
+                ip: t.ip,
+                country: t.country,
+                category: t.category,
+                json: t.raw_json,
+                json_pretty: t.raw_json_pretty || t.payload || "",
+              }));
+          renderRecords(latestRecords, data.updated_at);
+        } catch (err) {
+          console.error(err);
+        }
+      });
+      eventSource.onerror = () => {
+        statusEl.textContent = "Stream reconnecting...";
+      };
+    }
+
+    filterEl.addEventListener("input", () => renderRecords(latestRecords, statusEl.textContent));
+    hoursEl.addEventListener("change", () => {
+      fetchOnce().catch(console.error);
+      connectStream();
+    });
+    refreshBtn.addEventListener("click", () => fetchOnce().catch(console.error));
+    toggleStreamBtn.addEventListener("click", () => {
+      streaming = !streaming;
+      toggleStreamBtn.textContent = streaming ? "ストリーム停止" : "ストリーム再開";
+      if (streaming) connectStream();
+      else if (eventSource) eventSource.close();
+    });
+
+    fetchOnce().catch((e) => {
+      statusEl.textContent = `Fetch error: ${e.message}`;
+    });
+    connectStream();
+  </script>
+</body>
+</html>"""
+
+
 @app.get("/")
 async def serve_index() -> FileResponse:
-    return FileResponse(_resolve_static_file("index.html"))
+    index_path = STATIC_ROOT / "index.html"
+    if STATIC_ROOT.is_dir() and index_path.is_file():
+        return FileResponse(_resolve_static_file("index.html"))
+    raise HTTPException(status_code=404, detail="index.html not found")
+
+
+@app.get("/json")
+@app.get("/all-json")
+async def serve_all_json_viewer() -> StreamingResponse:
+    html = _render_all_json_html()
+    return StreamingResponse(iter([html]), media_type="text/html; charset=utf-8")
+
+
+@app.get("/api/json/all")
+async def get_all_json(
+    hours: int = Query(default=24, ge=1, le=720),
+    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
+) -> JSONResponse:
+    payload = await build_stats_payload(hours=hours, limit=limit)
+    records = payload.get("all_json_records", [])
+    return JSONResponse(
+        content={
+            "updated_at": payload.get("updated_at"),
+            "count": len(records),
+            "records": records,
+        }
+    )
 
 
 @app.get("/api/stats")
@@ -1475,7 +1656,7 @@ async def stream_stats(
                 break
             try:
                 payload = await build_stats_payload(hours=hours, limit=limit)
-                data_json = json.dumps(payload, ensure_ascii=False)
+                data_json = json.dumps(payload, ensure_ascii=False, default=str)
                 yield f"event: stats\ndata: {data_json}\n\n"
             except Exception as exc:
                 logger.warning("SSE stream generation error: %s", exc)
