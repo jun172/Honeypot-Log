@@ -171,6 +171,7 @@ button {
   font-size: 0.85rem;
   cursor: pointer;
   min-height: 36px;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 }
 
 button:hover {
@@ -269,7 +270,7 @@ button:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  flex: 1 1 420px;
   justify-content: flex-end;
 }
 
@@ -280,7 +281,7 @@ button:hover {
   border-radius: 8px;
   padding: 7px 11px;
   font-size: 0.88rem;
-  min-width: 260px;
+  min-width: 240px;
   flex: 1 1 240px;
   min-height: 36px;
 }
@@ -356,8 +357,12 @@ button:hover {
 }
 
 .table-wrap {
-  overflow-x: auto;
+  overflow: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+.timeline-card .table-wrap {
+  max-height: 72vh;
 }
 
 table {
@@ -380,6 +385,13 @@ th {
   font-size: 0.78rem;
   text-transform: uppercase;
   white-space: nowrap;
+  background-color: var(--bg-card);
+}
+
+.timeline-card th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 tbody tr:hover {

@@ -6,8 +6,10 @@ let isStreamPaused = false;
 let seenEventIds = new Set();
 let latestData = null;
 let searchQuery = "";
+let renderRafId = null;
 
-const MAX_SEEN_EVENT_IDS = 50000;
+const EXCLUDE_GOOGLE_AND_PRIVATE = true;
+const MAX_SEEN_EVENT_IDS = 100000;
 const ALLOWED_BADGE_CLASSES = new Set([
   "badge-danger",
   "badge-purple",
@@ -51,7 +53,7 @@ const I18N = {
     connecting: "ストリーム接続中...",
     fetch_error: "取得エラー",
     kpi_total: "総検知イベント数",
-    kpi_total_sub: "リアルタイム集計中",
+    kpi_total_sub: "観測ログ全件表示中",
     kpi_ips: "攻撃元ユニークIP",
     kpi_anomaly: "高異常度アラート (≥75%)",
     kpi_anomaly_sub: "Isolation Forest 異常検知",
@@ -68,8 +70,8 @@ const I18N = {
     th_isp: "ISP / 組織",
     th_tactic: "主な手口",
     th_times: "回数",
-    stream_title: "リアルタイム攻撃検知ストリーム（学習・検証用フル表示）",
-    search_placeholder: "IP・国・ISP・ペイロードで検索（例: 102.23.149.169）",
+    stream_title: "リアルタイム攻撃検知ストリーム（全観測ログ常時表示）",
+    search_placeholder: "IP・国・ISP・ペイロードで検索（例: 91.92.40.12）",
     clear_btn: "クリア",
     sse_note: "SSE プッシュ配信（3秒間隔）",
     th_time: "時刻 (UTC)",
@@ -104,7 +106,7 @@ const I18N = {
     connecting: "Connecting stream...",
     fetch_error: "Fetch error",
     kpi_total: "Total Detected Events",
-    kpi_total_sub: "Streaming live",
+    kpi_total_sub: "Showing all observed logs",
     kpi_ips: "Unique Source IPs",
     kpi_anomaly: "High Anomaly Alerts (≥75%)",
     kpi_anomaly_sub: "Isolation Forest detection",
@@ -121,8 +123,8 @@ const I18N = {
     th_isp: "ISP / Organization",
     th_tactic: "Top Tactic",
     th_times: "Hits",
-    stream_title: "Live Attack Detection Stream (Full Log View)",
-    search_placeholder: "Filter by IP, country, ISP, or payload (e.g. 102.23.149.169)",
+    stream_title: "Live Attack Detection Stream (All Observed Logs)",
+    search_placeholder: "Filter by IP, country, ISP, or payload (e.g. 91.92.40.12)",
     clear_btn: "Clear",
     sse_note: "SSE push stream (3s interval)",
     th_time: "Time (UTC)",
@@ -160,6 +162,46 @@ function createTextEl(tagName, text, className = "") {
   }
   el.textContent = toSafeText(text);
   return el;
+}
+
+function isPublicIpv4Str(ip) {
+  const s = toSafeText(ip).trim();
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(s)) return false;
+  const octets = s.split(".").map(Number);
+  if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return false;
+  if (octets[0] === 0 || octets[0] === 10 || octets[0] === 127) return false;
+  if (octets[0] === 169 && octets[1] === 254) return false;
+  if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return false;
+  if (octets[0] === 192 && octets[1] === 168) return false;
+  return true;
+}
+
+function isGoogleOrPrivateEntry(entry) {
+  if (!EXCLUDE_GOOGLE_AND_PRIVATE || !entry || typeof entry !== "object") {
+    return false;
+  }
+  const ip = toSafeText(entry.ip).trim().toLowerCase();
+  if (!ip || ip === "private" || ip === "unknown" || !isPublicIpv4Str(ip)) {
+    return true;
+  }
+
+  const isp = toSafeText(entry.isp).toLowerCase();
+  if (isp.includes("google")) {
+    return true;
+  }
+
+  const country = toSafeText(entry.country).toLowerCase();
+  const countryJa = toSafeText(entry.country_ja).trim();
+  if (
+    country.includes("private") ||
+    country.includes("local") ||
+    countryJa.includes("ローカル") ||
+    countryJa.includes("プライベート")
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function getSafeBadgeClass(candidate) {
@@ -208,8 +250,11 @@ function applyLanguage(lang) {
   const jaBtn = document.getElementById("lang-ja-btn");
   const enBtn = document.getElementById("lang-en-btn");
   if (jaBtn && enBtn) {
-    jaBtn.classList.toggle("active", currentLang === "ja");
-    enBtn.classList.toggle("active", currentLang === "en");
+    const isJa = currentLang === "ja";
+    jaBtn.classList.toggle("active", isJa);
+    enBtn.classList.toggle("active", !isJa);
+    jaBtn.setAttribute("aria-pressed", String(isJa));
+    enBtn.setAttribute("aria-pressed", String(!isJa));
   }
 
   const envJa = document.getElementById("env-content-ja");
@@ -227,6 +272,7 @@ function applyLanguage(lang) {
 function initMap() {
   const mapEl = document.getElementById("attack-map");
   if (!mapEl || typeof L === "undefined") return;
+  if (mapInstance) return;
 
   mapInstance = L.map("attack-map", {
     center: [25, 15],
@@ -290,7 +336,7 @@ function updateMarkers(points) {
   if (!Array.isArray(points)) return;
 
   points.forEach((pt) => {
-    if (!pt || typeof pt !== "object") return;
+    if (!pt || typeof pt !== "object" || isGoogleOrPrivateEntry(pt)) return;
     const lat = Number(pt.lat);
     const lon = Number(pt.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
@@ -367,13 +413,19 @@ function updateCategoryChart(categories) {
   });
 }
 
-function getFilteredTimeline(timeline) {
+function getAllObservedTimeline(timeline) {
   if (!Array.isArray(timeline)) return [];
-  const q = searchQuery.trim().toLowerCase();
-  if (!q) return timeline;
+  return timeline.filter(
+    (ev) => ev && typeof ev === "object" && !isGoogleOrPrivateEntry(ev)
+  );
+}
 
-  return timeline.filter((ev) => {
-    if (!ev || typeof ev !== "object") return false;
+function getFilteredTimeline(timeline) {
+  const baseList = getAllObservedTimeline(timeline);
+  const q = searchQuery.trim().toLowerCase();
+  if (!q) return baseList;
+
+  return baseList.filter((ev) => {
     const haystack = [
       ev.ip,
       ev.country,
@@ -396,11 +448,20 @@ function renderCountryTable(topCountries) {
   const countryBody = document.getElementById("country-table-body");
   if (!countryBody) return;
 
-  countryBody.textContent = "";
-  const items = Array.isArray(topCountries) ? topCountries : [];
+  const items = (Array.isArray(topCountries) ? topCountries : []).filter((item) => {
+    if (!item || typeof item !== "object" || !EXCLUDE_GOOGLE_AND_PRIVATE) return true;
+    const country = toSafeText(item.country).toLowerCase();
+    const countryJa = toSafeText(item.country_ja).trim();
+    return (
+      !country.includes("private") &&
+      !country.includes("local") &&
+      !countryJa.includes("ローカル") &&
+      !countryJa.includes("プライベート")
+    );
+  });
 
-  items.forEach((item, idx) => {
-    if (!item || typeof item !== "object") return;
+  const fragment = document.createDocumentFragment();
+  items.slice(0, 10).forEach((item, idx) => {
     const tr = document.createElement("tr");
 
     const tdRank = createTextEl("td", `#${idx + 1}`);
@@ -419,19 +480,22 @@ function renderCountryTable(topCountries) {
     tr.appendChild(tdRank);
     tr.appendChild(tdCountry);
     tr.appendChild(tdCount);
-    countryBody.appendChild(tr);
+    fragment.appendChild(tr);
   });
+
+  countryBody.replaceChildren(fragment);
 }
 
 function renderIpTable(topIps) {
   const ipBody = document.getElementById("ip-table-body");
   if (!ipBody) return;
 
-  ipBody.textContent = "";
-  const items = Array.isArray(topIps) ? topIps : [];
+  const items = (Array.isArray(topIps) ? topIps : []).filter(
+    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
+  );
 
-  items.forEach((item) => {
-    if (!item || typeof item !== "object") return;
+  const fragment = document.createDocumentFragment();
+  items.slice(0, 10).forEach((item) => {
     const ipStr = toSafeText(item.ip);
     const tr = document.createElement("tr");
     tr.className = "clickable-ip-row";
@@ -463,7 +527,7 @@ function renderIpTable(topIps) {
       const input = document.getElementById("ip-search-input");
       if (input) input.value = ipStr;
       searchQuery = ipStr;
-      if (latestData) renderTables(latestData);
+      if (latestData) scheduleRenderTables(latestData);
     });
 
     tr.appendChild(tdIp);
@@ -471,8 +535,10 @@ function renderIpTable(topIps) {
     tr.appendChild(tdIsp);
     tr.appendChild(tdTactic);
     tr.appendChild(tdCount);
-    ipBody.appendChild(tr);
+    fragment.appendChild(tr);
   });
+
+  ipBody.replaceChildren(fragment);
 }
 
 function renderTimelineTable(timeline) {
@@ -480,8 +546,8 @@ function renderTimelineTable(timeline) {
   const filterCountEl = document.getElementById("filter-count");
   if (!timelineBody) return;
 
-  const fullList = Array.isArray(timeline) ? timeline : [];
-  const filtered = getFilteredTimeline(fullList);
+  const fullList = getAllObservedTimeline(timeline);
+  const filtered = getFilteredTimeline(timeline);
 
   if (filterCountEl) {
     filterCountEl.textContent = searchQuery.trim()
@@ -491,10 +557,9 @@ function renderTimelineTable(timeline) {
 
   const nextSeen = new Set();
   const trackNew = seenEventIds.size > 0;
-  timelineBody.textContent = "";
+  const fragment = document.createDocumentFragment();
 
   filtered.forEach((ev) => {
-    if (!ev || typeof ev !== "object") return;
     const tsStr = toSafeText(ev.timestamp);
     const ipStr = toSafeText(ev.ip);
     const pathStr = toSafeText(ev.path, "/");
@@ -504,7 +569,7 @@ function renderTimelineTable(timeline) {
     const scoreNum = Number(ev.anomaly_score);
     const safeScore = Number.isFinite(scoreNum) ? scoreNum : 0;
 
-    const evId = toSafeText(ev.id) || `${tsStr}_${ipStr}_${pathStr}`;
+    const evId = toSafeText(ev.id) || `${tsStr}_${ipStr}_${methodStr}_${pathStr}`;
     if (nextSeen.size < MAX_SEEN_EVENT_IDS) {
       nextSeen.add(evId);
     }
@@ -547,9 +612,10 @@ function renderTimelineTable(timeline) {
     tr.appendChild(tdMl);
     tr.appendChild(tdAnomaly);
     tr.appendChild(tdPayload);
-    timelineBody.appendChild(tr);
+    fragment.appendChild(tr);
   });
 
+  timelineBody.replaceChildren(fragment);
   seenEventIds = nextSeen;
 }
 
@@ -558,6 +624,42 @@ function renderTables(data) {
   renderCountryTable(data.top_countries);
   renderIpTable(data.top_ips);
   renderTimelineTable(data.timeline);
+}
+
+function scheduleRenderTables(data) {
+  if (renderRafId !== null) {
+    cancelAnimationFrame(renderRafId);
+  }
+  renderRafId = requestAnimationFrame(() => {
+    renderRafId = null;
+    renderTables(data);
+  });
+}
+
+function computeDerivedStats(data) {
+  const observedTimeline = getAllObservedTimeline(data.timeline);
+  const ipSet = new Set();
+  const countrySet = new Set();
+  const categories = {};
+  let highAnomalyCount = 0;
+
+  observedTimeline.forEach((ev) => {
+    if (ev.ip) ipSet.add(toSafeText(ev.ip));
+    if (ev.country) countrySet.add(toSafeText(ev.country));
+    const cat = toSafeText(ev.category, "Unknown");
+    categories[cat] = (categories[cat] || 0) + 1;
+    if (Number(ev.anomaly_score) >= 75) {
+      highAnomalyCount += 1;
+    }
+  });
+
+  return {
+    totalAttacks: observedTimeline.length,
+    uniqueIps: ipSet.size,
+    uniqueCountries: countrySet.size,
+    highAnomalyCount,
+    categories,
+  };
 }
 
 function applyDashboardData(data) {
@@ -576,30 +678,26 @@ function applyDashboardData(data) {
     }
   }
 
-  const summary = data.summary && typeof data.summary === "object" ? data.summary : {};
   const cost = data.cost && typeof data.cost === "object" ? data.cost : {};
+  const derived = computeDerivedStats(data);
 
-  const totalAttacks = Number(summary.total_attacks) || 0;
-  const uniqueIps = Number(summary.unique_ips) || 0;
-  const uniqueCountries = Number(summary.unique_countries) || 0;
-  const highAnomaly = Number(summary.high_anomaly_count) || 0;
   const estUsd = Number(cost.estimated_monthly_usd) || 0;
   const estJpy = Number(cost.estimated_monthly_jpy) || 0;
   const quotaPct = Number(cost.logging_free_tier_pct) || 0;
 
-  document.getElementById("kpi-total").textContent = totalAttacks.toLocaleString();
-  document.getElementById("kpi-ips").textContent = uniqueIps.toLocaleString();
+  document.getElementById("kpi-total").textContent = derived.totalAttacks.toLocaleString();
+  document.getElementById("kpi-ips").textContent = derived.uniqueIps.toLocaleString();
   document.getElementById("kpi-countries-sub").textContent =
-    I18N[currentLang].countries_observed(uniqueCountries);
-  document.getElementById("kpi-anomaly").textContent = highAnomaly.toLocaleString();
+    I18N[currentLang].countries_observed(derived.uniqueCountries);
+  document.getElementById("kpi-anomaly").textContent = derived.highAnomalyCount.toLocaleString();
   document.getElementById("kpi-cost").textContent =
     `$${estUsd.toFixed(2)} (¥${Math.round(estJpy).toLocaleString()})`;
   document.getElementById("kpi-quota").textContent =
     I18N[currentLang].quota_label(quotaPct);
 
   updateMarkers(data.map_points);
-  updateCategoryChart(data.categories);
-  renderTables(data);
+  updateCategoryChart(derived.categories);
+  scheduleRenderTables(data);
 
   const lastUpdated = document.getElementById("last-updated");
   if (lastUpdated) {
@@ -615,7 +713,9 @@ async function fetchOnce() {
   if (!hoursEl) return;
   const hours = Number(hoursEl.value) || 24;
   try {
-    const res = await fetch(`/api/stats?hours=${encodeURIComponent(hours)}`);
+    const res = await fetch(
+      `/api/stats?hours=${encodeURIComponent(hours)}&limit=50000`
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     applyDashboardData(data);
@@ -641,7 +741,9 @@ function connectStream() {
     streamBadge.className = "badge badge-info";
   }
 
-  eventSource = new EventSource(`/api/stream?hours=${encodeURIComponent(hours)}`);
+  eventSource = new EventSource(
+    `/api/stream?hours=${encodeURIComponent(hours)}&limit=50000`
+  );
 
   eventSource.addEventListener("stats", (event) => {
     if (streamBadge) {
@@ -735,7 +837,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (searchInput) {
       searchInput.addEventListener("input", (e) => {
         searchQuery = e.target.value || "";
-        if (latestData) renderTables(latestData);
+        if (latestData) scheduleRenderTables(latestData);
       });
     }
 
@@ -743,7 +845,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearBtn.addEventListener("click", () => {
         if (searchInput) searchInput.value = "";
         searchQuery = "";
-        if (latestData) renderTables(latestData);
+        if (latestData) scheduleRenderTables(latestData);
       });
     }
 

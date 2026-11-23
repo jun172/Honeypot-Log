@@ -2,18 +2,72 @@ import asyncio
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 import json
 import logging as std_logging
 import os
 from pathlib import Path
 import re
+import smtplib
 import time
 from typing import Any, AsyncGenerator
+
+
+def _load_dotenv_if_present() -> None:
+    """カレントまたは main.py と同じフォルダの .env を読み込む（既存環境変数を優先）。"""
+    candidates = [
+        Path(__file__).resolve().parent / ".env",
+        Path.cwd() / ".env",
+    ]
+    seen_paths: set[Path] = set()
+    for env_path in candidates:
+        resolved = env_path.resolve()
+        if resolved in seen_paths or not resolved.is_file():
+            continue
+        seen_paths.add(resolved)
+        try:
+            for raw_line in resolved.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                if not key or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    continue
+                if len(val) >= 2 and (
+                    (val.startswith('"') and val.endswith('"'))
+                    or (val.startswith("'") and val.endswith("'"))
+                ):
+                    quote = val[0]
+                    inner = val[1:-1]
+                    if quote == '"':
+                        inner = (
+                            inner.replace("\\n", "\n")
+                            .replace("\\r", "\r")
+                            .replace('\\"', '"')
+                            .replace("\\\\", "\\")
+                        )
+                    val = inner
+                elif " #" in val:
+                    val = val.split(" #", 1)[0].strip()
+                if key not in os.environ:
+                    os.environ[key] = val
+        except OSError:
+            continue
+
+
+_load_dotenv_if_present()
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from google.cloud import bigquery as gcp_bigquery
 from google.cloud import logging as gcp_logging
 from google.cloud import storage as gcp_storage
 import httpx
@@ -35,7 +89,7 @@ MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(10 * 1024 * 1024)))
 MIN_STREAM_INTERVAL_SEC = 1.0
 
 # ==========================================
-# 設定・定数（実ログのみ取得・Cloud Logging + GCS 両対応）
+# 設定・定数（Cloud Logging + GCS + BigQuery 統合）
 # ==========================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "honeypot-515503")
 LOG_SOURCE_PROJECT_ID = os.getenv("LOG_SOURCE_PROJECT_ID", GCP_PROJECT_ID)
@@ -54,7 +108,14 @@ LOG_GCS_BUCKETS: list[str] = [
     item.strip() for item in _RAW_GCS_BUCKETS.split(",") if item.strip()
 ]
 
-LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "both").strip().lower()
+BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "honeypot-logs")
+BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "honeypot_dataset")
+BQ_TABLE_NAME = os.getenv("BQ_TABLE_NAME", "run_googleapis_com_stdout")
+BQ_TABLE_ID = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_NAME}"
+ENABLE_BIGQUERY_LOGS = os.getenv("ENABLE_BIGQUERY_LOGS", "true").lower() == "true"
+
+# "all" -> logging + gcs + bigquery / "both" -> logging + gcs / "bigquery" / "logging" / "gcs"
+LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "all").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
 MAX_GCS_BLOBS = min(max(int(os.getenv("MAX_GCS_BLOBS", "200")), 1), 2000)
@@ -67,7 +128,7 @@ USD_TO_JPY = float(os.getenv("USD_TO_JPY", "152.0"))
 STREAM_INTERVAL_SEC = max(
     float(os.getenv("STREAM_INTERVAL_SEC", "3.0")), MIN_STREAM_INTERVAL_SEC
 )
-LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "15.0")), 1.0)
+LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "5.0")), 1.0)
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
 ALLOWED_ORIGINS: list[str] = (
@@ -81,7 +142,9 @@ LOG_RESPONSE_CACHE: OrderedDict[
     tuple[float, dict[str, Any]],
 ] = OrderedDict()
 
-SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", "false").lower() == "true"
+SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", "true").lower() == "true"
+SKIP_GOOGLE_LLC = os.getenv("SKIP_GOOGLE_LLC", "true").lower() == "true"
+SKIP_PRIVATE_IPS = os.getenv("SKIP_PRIVATE_IPS", "true").lower() == "true"
 SKIP_SYSTEM_NOISE = os.getenv("SKIP_SYSTEM_NOISE", "true").lower() == "true"
 SKIP_JAPAN_IPS = os.getenv("SKIP_JAPAN_IPS", "true").lower() == "true"
 
@@ -94,6 +157,27 @@ IGNORED_IPS: set[str] = (
 IGNORED_PREFIXES: tuple[str, ...] = tuple(
     p.strip() for p in os.getenv("IGNORED_PREFIXES", "").split(",") if p.strip()
 )
+
+# ==========================================
+# 異常検知メール通知設定
+# ==========================================
+ENABLE_EMAIL_ALERT = os.getenv("ENABLE_EMAIL_ALERT", "false").lower() == "true"
+ALERT_ANOMALY_THRESHOLD = int(os.getenv("ALERT_ANOMALY_THRESHOLD", "80"))
+ALERT_COOLDOWN_SEC = max(float(os.getenv("ALERT_COOLDOWN_SEC", "300")), 10.0)
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", SMTP_USER).strip()
+ALERT_TO_EMAILS: list[str] = [
+    addr.strip()
+    for addr in os.getenv("ALERT_TO_EMAILS", "").split(",")
+    if addr.strip()
+]
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+
+_LAST_ALERT_SENT_AT: dict[str, float] = {}
 
 GEO_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 GEO_SUCCESS_TTL = float(os.getenv("GEO_SUCCESS_TTL", str(60 * 60 * 24)))
@@ -140,6 +224,10 @@ COUNTRY_JA_MAP: dict[str, str] = {
 CRAWLER_UA_KEYWORDS = (
     "googlebot",
     "google-lens",
+    "google-inspectiontool",
+    "adsbot-google",
+    "apis-google",
+    "mediapartners-google",
     "bingbot",
     "yandexbot",
     "duckduckbot",
@@ -220,6 +308,33 @@ def _is_japan_geo(geo: dict[str, Any]) -> bool:
     return cc == "JP" or ja_name == "日本" or en_name == "japan"
 
 
+def _is_google_llc(geo: dict[str, Any], user_agent: str = "", raw_text: str = "") -> bool:
+    isp = str(geo.get("isp") or "").strip().lower()
+    ua = (user_agent or "").strip().lower()
+    raw_l = (raw_text or "").strip().lower()
+    return (
+        "google" in isp
+        or any(k in ua for k in ("googlebot", "google-lens", "googlehc", "apis-google"))
+        or "google-lens" in raw_l
+        or "googleusercontent.com" in raw_l
+    )
+
+
+def _is_private_or_non_public_ip(ip: str, geo: dict[str, Any] | None = None) -> bool:
+    ip_clean = (ip or "").strip().lower()
+    if not ip_clean or ip_clean == "private" or not is_public_ipv4(ip_clean):
+        return True
+    if geo:
+        country = str(geo.get("country") or "").strip().lower()
+        country_ja = str(geo.get("country_ja") or "").strip()
+        if country in {"private / local", "ローカル", "プライベート"} or country_ja in {
+            "ローカル",
+            "プライベート",
+        }:
+            return True
+    return False
+
+
 CLASSIFIER_PIPELINE: Pipeline | None = None
 ANOMALY_MODEL: IsolationForest | None = None
 
@@ -233,6 +348,7 @@ def init_ml_models() -> None:
         ("GET /shell?cmd=cat+/etc/passwd;+uname+-a", "RCE / Command Injection"),
         ("POST /vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php <?php system('id'); ?>", "RCE / Command Injection"),
         ("GET /boaform/admin/formPing?target_addr=127.0.0.1|busybox", "RCE / Command Injection"),
+        ("POST / process.mainModule.require child_process spawn /bin/sh", "RCE / Command Injection"),
         ("SetIamPolicy service-agent-manager", "RCE / Command Injection"),
         ("GET /.env HTTP/1.1", "Credential / Env Theft"),
         ("GET /.git/config HTTP/1.1", "Credential / Env Theft"),
@@ -315,9 +431,30 @@ def classify_and_score(
     confidence = round(float(probs[best_idx]) * 100.0, 1)
 
     lower_sig = signal_text.lower()
-    if any(k in lower_sig for k in ("formsyscmd", "nc ", "|sh", "| sh", "wget ", "curl ", "busybox", "/etc/passwd")):
+    if any(
+        k in lower_sig
+        for k in (
+            "formsyscmd",
+            "nc ",
+            "|sh",
+            "| sh",
+            "wget ",
+            "curl ",
+            "busybox",
+            "/etc/passwd",
+            "process.mainmodule",
+            "child_process",
+            "spawn(",
+            "/bin/sh",
+            "/bin/bash",
+        )
+    ):
         category = "RCE / Command Injection"
         confidence = max(confidence, 88.0)
+    elif any(k in lower_sig for k in (".env", ".git", "credentials", "id_rsa", "actuator")):
+        if category == "Automated Recon / Scanner":
+            category = "Credential / Env Theft"
+            confidence = max(confidence, 82.0)
     elif event_type == "bad_request" or "xpanse" in lower_sig or "mglndd" in lower_sig:
         if category == "Credential / Env Theft":
             category = "Automated Recon / Scanner"
@@ -344,7 +481,9 @@ def code_to_flag(country_code: str) -> str:
 
 def is_public_ipv4(ip: str) -> bool:
     s = (ip or "").strip()
-    if not s or s.lower() in {"127.0.0.1", "0.0.0.0", "unknown", "private"}:
+    if s.startswith("::ffff:"):
+        s = s.removeprefix("::ffff:")
+    if not s or s.lower() in {"127.0.0.1", "0.0.0.0", "unknown", "private", "localhost"}:
         return False
     if s.startswith(("10.", "192.168.", "169.254.")):
         return False
@@ -382,13 +521,13 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
     ip_clean = (ip or "").strip().lower()
     if ip_clean == "private":
         return {
-            "country": "Unknown",
-            "country_ja": "不明",
+            "country": "Private / Local",
+            "country_ja": "プライベート",
             "country_code": "",
-            "flag": "🌐",
+            "flag": "🏠",
             "lat": 0.0,
             "lon": 0.0,
-            "isp": sanitize_display_text(geo.get("isp") or "Unknown ISP", max_len=150),
+            "isp": sanitize_display_text(geo.get("isp") or "Private Network", max_len=150),
         }
 
     if cc in COUNTRY_JA_MAP:
@@ -406,7 +545,11 @@ def _normalize_geo_entry(raw_geo: dict[str, Any] | None, ip: str = "") -> dict[s
     if computed_flag != "🌐":
         flag = computed_flag
     elif not flag or flag == "🌐":
-        if en_name in {"Private / Local", "ローカル"} or ja_name in {"Private / Local", "ローカル"}:
+        if en_name in {"Private / Local", "ローカル", "プライベート"} or ja_name in {
+            "Private / Local",
+            "ローカル",
+            "プライベート",
+        }:
             flag = "🏠"
         else:
             flag = "🌐"
@@ -459,13 +602,13 @@ async def resolve_geoip_batch(ips: list[str]) -> dict[str, dict[str, Any]]:
             uncached.append(ip)
         elif (ip or "").strip().lower() == "private":
             data = {
-                "country": "Unknown",
-                "country_ja": "不明",
+                "country": "Private / Local",
+                "country_ja": "プライベート",
                 "country_code": "",
-                "flag": "🌐",
+                "flag": "🏠",
                 "lat": 0.0,
                 "lon": 0.0,
-                "isp": "Unknown ISP",
+                "isp": "Private Network",
             }
             _set_cached_geo(ip, data, is_error=False, now_mono=now_mono)
             result_map[ip] = _normalize_geo_entry(data, ip=ip)
@@ -587,6 +730,8 @@ def _is_ignored_ip(ip: str) -> bool:
     cleaned = (ip or "").strip()
     if not cleaned:
         return False
+    if SKIP_PRIVATE_IPS and _is_private_or_non_public_ip(cleaned):
+        return True
     if IGNORED_IPS and cleaned in IGNORED_IPS:
         return True
     if IGNORED_PREFIXES and any(cleaned.startswith(prefix) for prefix in IGNORED_PREFIXES):
@@ -620,8 +765,10 @@ def _should_skip_record(
         }:
             return True
 
-    if SKIP_CRAWLERS:
+    if SKIP_CRAWLERS or SKIP_GOOGLE_LLC:
         if any(kw in ua_lower for kw in CRAWLER_UA_KEYWORDS):
+            return True
+        if SKIP_GOOGLE_LLC and ("google-lens" in lower_text or "googleusercontent.com" in lower_text):
             return True
         if path in {"/healthz", "/favicon.ico"} and not ua_lower and event_type != "bad_request":
             return True
@@ -982,28 +1129,107 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
     return records[:limit]
 
 
+def _fetch_bigquery_entries_sync(cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
+    if not ENABLE_BIGQUERY_LOGS or limit <= 0 or not BQ_TABLE_ID:
+        return []
+
+    cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    query = f"""
+SELECT
+  timestamp,
+  jsonPayload,
+  textPayload
+FROM
+  `{BQ_TABLE_ID}`
+WHERE
+  timestamp >= TIMESTAMP('{cutoff_iso}')
+ORDER BY
+  timestamp DESC
+LIMIT {safe_limit}
+"""
+
+    records: list[dict[str, Any]] = []
+    try:
+        bq_client = gcp_bigquery.Client(project=BQ_PROJECT_ID)
+        rows = bq_client.query(query).result()
+        for row in rows:
+            ts_dt = _parse_timestamp_str(getattr(row, "timestamp", None), datetime.now(timezone.utc))
+            if ts_dt < cutoff_dt:
+                continue
+
+            jp = _parse_json_dict(getattr(row, "jsonPayload", None))
+            tp = getattr(row, "textPayload", None)
+
+            if jp:
+                target_dict: dict[str, Any] = jp
+            elif isinstance(tp, str) and tp.strip():
+                target_dict = _parse_json_dict(tp) or {"event": "text", "message": tp.strip()}
+            else:
+                continue
+
+            msg = target_dict.get("message")
+            if isinstance(msg, str) and msg.strip().startswith("{"):
+                nested_msg = _parse_json_dict(msg)
+                if nested_msg:
+                    merged = dict(nested_msg)
+                    for k, v in target_dict.items():
+                        if k != "message" and v is not None:
+                            merged.setdefault(k, v)
+                    target_dict = merged
+
+            rec = _build_record_from_dict_and_meta(
+                target_dict=target_dict,
+                http_req={},
+                ts_dt=ts_dt,
+                fallback_ip="private",
+                fallback_event=str(target_dict.get("event") or "request").lower(),
+            )
+            if rec is not None:
+                records.append(rec)
+                if len(records) >= limit:
+                    break
+    except Exception as exc:
+        logger.warning("Failed to fetch logs from BigQuery %s: %s", BQ_TABLE_ID, exc)
+
+    return records[:limit]
+
+
 def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     now_dt = datetime.now(timezone.utc)
     cutoff_dt = now_dt - timedelta(hours=hours)
     combined: list[dict[str, Any]] = []
 
-    if LOG_SOURCE_MODE in {"both", "logging"}:
+    if LOG_SOURCE_MODE in {"all", "both", "logging"}:
         combined.extend(
             _fetch_cloud_logging_entries_sync(
                 cutoff_dt=cutoff_dt, limit=effective_limit
             )
         )
 
-    if LOG_SOURCE_MODE in {"both", "gcs"}:
+    if LOG_SOURCE_MODE in {"all", "both", "gcs"}:
         combined.extend(
             _fetch_gcs_entries_sync(
                 now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit
             )
         )
 
-    combined.sort(key=lambda r: r["timestamp"], reverse=True)
-    return combined[:effective_limit]
+    if LOG_SOURCE_MODE in {"all", "bigquery"}:
+        combined.extend(
+            _fetch_bigquery_entries_sync(
+                cutoff_dt=cutoff_dt, limit=effective_limit
+            )
+        )
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for rec in combined:
+        key = f"{rec['timestamp']}|{rec['ip']}|{rec['method']}|{rec['path']}|{rec['payload'][:120]}"
+        if key not in deduped:
+            deduped[key] = rec
+
+    ordered = sorted(deduped.values(), key=lambda r: r["timestamp"], reverse=True)
+    return ordered[:effective_limit]
 
 
 async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -1042,6 +1268,87 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
     }
 
 
+def _send_alert_email_sync(alert_events: list[dict[str, Any]], updated_at: str) -> None:
+    if not (
+        ENABLE_EMAIL_ALERT
+        and SMTP_HOST
+        and ALERT_FROM_EMAIL
+        and ALERT_TO_EMAILS
+        and alert_events
+    ):
+        return
+
+    top_ev = alert_events[0]
+    subject = (
+        f"[Honeypot Alert] 異常検知 ({len(alert_events)}件) "
+        f"- {top_ev.get('category')} / {top_ev.get('ip')} (Score {top_ev.get('anomaly_score')}%)"
+    )
+
+    lines = [
+        "ハニーポット監視ダッシュボードで異常リクエストを検知しました。",
+        f"検知時刻 (UTC): {updated_at}",
+        f"対象件数: {len(alert_events)} 件 (しきい値: {ALERT_ANOMALY_THRESHOLD}%)",
+        "",
+        "--- 検知内容 ---",
+    ]
+    for ev in alert_events[:20]:
+        lines.extend(
+            [
+                f"・時刻: {ev.get('timestamp')}",
+                f"  送信元IP: {ev.get('ip')} ({ev.get('country')})",
+                f"  分類 / 異常度: {ev.get('category')} / {ev.get('anomaly_score')}%",
+                f"  リクエスト: {ev.get('method')} {ev.get('path')}",
+                f"  ペイロード抜粋: {str(ev.get('payload') or '')[:300]}",
+                "",
+            ]
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = ALERT_FROM_EMAIL
+    msg["To"] = ", ".join(ALERT_TO_EMAILS)
+    msg.set_content("\n".join(lines))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USER and SMTP_PASSWORD:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    except Exception as exc:
+        logger.warning("Failed to send alert email: %s", exc)
+
+
+async def maybe_dispatch_anomaly_alert(
+    timeline_events: list[dict[str, Any]],
+    updated_at: str,
+) -> None:
+    if not ENABLE_EMAIL_ALERT or not timeline_events:
+        return
+
+    now_mono = time.monotonic()
+    candidates: list[dict[str, Any]] = []
+
+    for ev in timeline_events:
+        score = _safe_int(ev.get("anomaly_score"), 0)
+        category = str(ev.get("category") or "")
+        is_critical = score >= ALERT_ANOMALY_THRESHOLD or category == "RCE / Command Injection"
+        if not is_critical:
+            continue
+
+        dedup_key = f"{ev.get('ip')}|{category}|{ev.get('path')}"
+        last_sent = _LAST_ALERT_SENT_AT.get(dedup_key, 0.0)
+        if (now_mono - last_sent) < ALERT_COOLDOWN_SEC:
+            continue
+
+        _LAST_ALERT_SENT_AT[dedup_key] = now_mono
+        candidates.append(ev)
+
+    if candidates:
+        await asyncio.to_thread(_send_alert_email_sync, candidates, updated_at)
+
+
 async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     cache_key = (
@@ -1049,11 +1356,15 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         effective_limit,
         tuple(LOG_PROJECTS),
         tuple(LOG_GCS_BUCKETS),
+        BQ_TABLE_ID,
+        ENABLE_BIGQUERY_LOGS,
         LOG_SOURCE_MODE,
         LOG_FILTER,
         LOG_GCS_PREFIX,
         SKIP_JAPAN_IPS,
         SKIP_CRAWLERS,
+        SKIP_GOOGLE_LLC,
+        SKIP_PRIVATE_IPS,
         SKIP_SYSTEM_NOISE,
     )
     now_mono = time.monotonic()
@@ -1080,6 +1391,11 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     for rec in raw_records:
         ip = rec["ip"]
         geo = _normalize_geo_entry(geo_map.get(ip), ip=ip)
+
+        if SKIP_PRIVATE_IPS and _is_private_or_non_public_ip(ip, geo):
+            continue
+        if SKIP_GOOGLE_LLC and _is_google_llc(geo, rec.get("user_agent", ""), rec.get("payload", "")):
+            continue
         if SKIP_JAPAN_IPS and _is_japan_geo(geo):
             continue
 
@@ -1144,7 +1460,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 }
             map_points_dict[ip]["count"] += 1
 
-        if len(timeline_events) < MAX_TIMELINE_EVENTS:
+        if len(timeline_events) < min(MAX_TIMELINE_EVENTS, effective_limit):
             safe_path = sanitize_display_text(rec["path"], max_len=500)
             safe_payload = sanitize_display_text(rec["payload"], max_len=1200)
             timeline_events.append(
@@ -1190,6 +1506,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "timeline": timeline_events,
         "cost": cost_info,
     }
+
+    await maybe_dispatch_anomaly_alert(timeline_events, payload["updated_at"])
 
     LOG_RESPONSE_CACHE[cache_key] = (time.monotonic(), payload)
     LOG_RESPONSE_CACHE.move_to_end(cache_key)
@@ -1246,7 +1564,7 @@ async def serve_index() -> FileResponse:
 @app.get("/api/stats")
 async def get_stats(
     hours: int = Query(default=24, ge=1, le=720),
-    limit: int = Query(default=1000, ge=1, le=MAX_ALLOWED_LIMIT),
+    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
 ) -> dict[str, Any]:
     return await build_stats_payload(hours=hours, limit=limit)
 
@@ -1255,7 +1573,7 @@ async def get_stats(
 async def stream_stats(
     request: Request,
     hours: int = Query(default=24, ge=1, le=720),
-    limit: int = Query(default=1000, ge=1, le=MAX_ALLOWED_LIMIT),
+    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
 ) -> StreamingResponse:
     async def event_generator() -> AsyncGenerator[str, None]:
         while True:

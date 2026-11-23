@@ -29,8 +29,8 @@
     </div>
     <div class="controls">
       <div class="lang-switch" role="group" aria-label="Language switcher">
-        <button id="lang-ja-btn" type="button" class="lang-btn active">日本語</button>
-        <button id="lang-en-btn" type="button" class="lang-btn">English</button>
+        <button id="lang-ja-btn" type="button" class="lang-btn active" aria-pressed="true">日本語</button>
+        <button id="lang-en-btn" type="button" class="lang-btn" aria-pressed="false">English</button>
       </div>
       <label for="hours-select" data-i18n="period_label">集計期間:</label>
       <select id="hours-select">
@@ -50,7 +50,7 @@
       <div class="card kpi-card">
         <div class="kpi-label" data-i18n="kpi_total">総検知イベント数</div>
         <div id="kpi-total" class="kpi-value">0</div>
-        <div class="kpi-sub" data-i18n="kpi_total_sub">リアルタイム集計中</div>
+        <div class="kpi-sub" data-i18n="kpi_total_sub">観測ログ全件表示中</div>
       </div>
       <div class="card kpi-card">
         <div class="kpi-label" data-i18n="kpi_ips">攻撃元ユニークIP</div>
@@ -131,14 +131,14 @@
 
     <section class="card timeline-card" aria-label="Realtime attack stream">
       <div class="card-header">
-        <h2 data-i18n="stream_title">リアルタイム攻撃検知ストリーム（学習・検証用フル表示）</h2>
+        <h2 data-i18n="stream_title">リアルタイム攻撃検知ストリーム（全観測ログ常時表示）</h2>
         <div class="filter-controls">
           <label for="ip-search-input" class="visually-hidden" data-i18n="search_placeholder">検索</label>
           <input
             id="ip-search-input"
             type="text"
             maxlength="200"
-            placeholder="IP・国・ISP・ペイロードで検索（例: 102.23.149.169）"
+            placeholder="IP・国・ISP・ペイロードで検索（例: 91.92.40.12）"
             autocomplete="off"
             spellcheck="false"
           />
