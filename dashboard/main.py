@@ -2,13 +2,11 @@ import asyncio
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 import json
 import logging as std_logging
 import os
 from pathlib import Path
 import re
-import smtplib
 import time
 from typing import Any, AsyncGenerator
 
@@ -157,27 +155,6 @@ IGNORED_IPS: set[str] = (
 IGNORED_PREFIXES: tuple[str, ...] = tuple(
     p.strip() for p in os.getenv("IGNORED_PREFIXES", "").split(",") if p.strip()
 )
-
-# ==========================================
-# 異常検知メール通知設定
-# ==========================================
-ENABLE_EMAIL_ALERT = os.getenv("ENABLE_EMAIL_ALERT", "false").lower() == "true"
-ALERT_ANOMALY_THRESHOLD = int(os.getenv("ALERT_ANOMALY_THRESHOLD", "80"))
-ALERT_COOLDOWN_SEC = max(float(os.getenv("ALERT_COOLDOWN_SEC", "300")), 10.0)
-
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "").strip()
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", SMTP_USER).strip()
-ALERT_TO_EMAILS: list[str] = [
-    addr.strip()
-    for addr in os.getenv("ALERT_TO_EMAILS", "").split(",")
-    if addr.strip()
-]
-SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-
-_LAST_ALERT_SENT_AT: dict[str, float] = {}
 
 GEO_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 GEO_SUCCESS_TTL = float(os.getenv("GEO_SUCCESS_TTL", str(60 * 60 * 24)))
@@ -1268,87 +1245,6 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
     }
 
 
-def _send_alert_email_sync(alert_events: list[dict[str, Any]], updated_at: str) -> None:
-    if not (
-        ENABLE_EMAIL_ALERT
-        and SMTP_HOST
-        and ALERT_FROM_EMAIL
-        and ALERT_TO_EMAILS
-        and alert_events
-    ):
-        return
-
-    top_ev = alert_events[0]
-    subject = (
-        f"[Honeypot Alert] 異常検知 ({len(alert_events)}件) "
-        f"- {top_ev.get('category')} / {top_ev.get('ip')} (Score {top_ev.get('anomaly_score')}%)"
-    )
-
-    lines = [
-        "ハニーポット監視ダッシュボードで異常リクエストを検知しました。",
-        f"検知時刻 (UTC): {updated_at}",
-        f"対象件数: {len(alert_events)} 件 (しきい値: {ALERT_ANOMALY_THRESHOLD}%)",
-        "",
-        "--- 検知内容 ---",
-    ]
-    for ev in alert_events[:20]:
-        lines.extend(
-            [
-                f"・時刻: {ev.get('timestamp')}",
-                f"  送信元IP: {ev.get('ip')} ({ev.get('country')})",
-                f"  分類 / 異常度: {ev.get('category')} / {ev.get('anomaly_score')}%",
-                f"  リクエスト: {ev.get('method')} {ev.get('path')}",
-                f"  ペイロード抜粋: {str(ev.get('payload') or '')[:300]}",
-                "",
-            ]
-        )
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = ALERT_FROM_EMAIL
-    msg["To"] = ", ".join(ALERT_TO_EMAILS)
-    msg.set_content("\n".join(lines))
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-            if SMTP_USE_TLS:
-                server.starttls()
-            if SMTP_USER and SMTP_PASSWORD:
-                server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
-    except Exception as exc:
-        logger.warning("Failed to send alert email: %s", exc)
-
-
-async def maybe_dispatch_anomaly_alert(
-    timeline_events: list[dict[str, Any]],
-    updated_at: str,
-) -> None:
-    if not ENABLE_EMAIL_ALERT or not timeline_events:
-        return
-
-    now_mono = time.monotonic()
-    candidates: list[dict[str, Any]] = []
-
-    for ev in timeline_events:
-        score = _safe_int(ev.get("anomaly_score"), 0)
-        category = str(ev.get("category") or "")
-        is_critical = score >= ALERT_ANOMALY_THRESHOLD or category == "RCE / Command Injection"
-        if not is_critical:
-            continue
-
-        dedup_key = f"{ev.get('ip')}|{category}|{ev.get('path')}"
-        last_sent = _LAST_ALERT_SENT_AT.get(dedup_key, 0.0)
-        if (now_mono - last_sent) < ALERT_COOLDOWN_SEC:
-            continue
-
-        _LAST_ALERT_SENT_AT[dedup_key] = now_mono
-        candidates.append(ev)
-
-    if candidates:
-        await asyncio.to_thread(_send_alert_email_sync, candidates, updated_at)
-
-
 async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     cache_key = (
@@ -1506,8 +1402,6 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "timeline": timeline_events,
         "cost": cost_info,
     }
-
-    await maybe_dispatch_anomaly_alert(timeline_events, payload["updated_at"])
 
     LOG_RESPONSE_CACHE[cache_key] = (time.monotonic(), payload)
     LOG_RESPONSE_CACHE.move_to_end(cache_key)
