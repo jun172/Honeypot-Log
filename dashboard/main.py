@@ -370,15 +370,26 @@ def is_public_ipv4(ip: str) -> bool:
         s = s.removeprefix("::ffff:")
     if not s or s.lower() in {"127.0.0.1", "0.0.0.0", "unknown", "private", "localhost"}:
         return False
-    if s.startswith(("10.", "192.168.", "169.254.")):
-        return False
-    if s.startswith("172."):
-        parts = s.split(".")
-        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            return False
     if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", s):
         return False
-    return all(0 <= int(octet) <= 255 for octet in s.split("."))
+    octets: list[int] = []
+    for part in s.split("."):
+        if len(part) > 1 and part.startswith("0"):
+            return False
+        val = int(part)
+        if not (0 <= val <= 255):
+            return False
+        octets.append(val)
+    a, b, _, _ = octets
+    if a in {0, 10, 127}:
+        return False
+    if a == 169 and b == 254:
+        return False
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 192 and b == 168:
+        return False
+    return True
 
 
 def _is_japan_geo(geo: dict[str, Any]) -> bool:
@@ -1655,7 +1666,7 @@ def _parse_blob_text_to_records(
                             return out
                 return out
         except json.JSONDecodeError:
-            pass
+            logger.debug("JSON array parse fallback to line-by-line in %s", source_name)
 
     for line in stripped.splitlines():
         line_s = line.strip()
@@ -1689,7 +1700,7 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime | None, limit: int) ->
     full_filter = " AND ".join(clauses)
 
     records: list[dict[str, Any]] = []
-    per_project_limit = max(1, (limit + len(LOG_PROJECTS) - 1) // len(LOG_PROJECTS))
+    per_project_limit = limit
     page_size = min(max(per_project_limit, 100), 1000)
 
     for project_id in LOG_PROJECTS:
@@ -1727,7 +1738,7 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime | None, limit:
         return []
 
     records: list[dict[str, Any]] = []
-    per_bucket_limit = max(1, (limit + len(LOG_GCS_BUCKETS) - 1) // len(LOG_GCS_BUCKETS))
+    per_bucket_limit = limit
     min_blob_time = (cutoff_dt - timedelta(days=1)) if cutoff_dt is not None else None
 
     for bucket_name in LOG_GCS_BUCKETS:
@@ -1744,6 +1755,7 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime | None, limit:
             candidate_blobs = [b for b in blobs if (b.updated is None or b.updated >= min_blob_time)]
         else:
             candidate_blobs = list(blobs)
+
         candidate_blobs.sort(
             key=lambda b: b.updated or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
@@ -2405,4 +2417,3 @@ async def stream_stats(
 @app.get("/environment.html")
 async def serve_environment() -> FileResponse:
     return FileResponse(_resolve_static_file("environment.html"))
-
