@@ -1,5 +1,3 @@
-let mapInstance = null;
-let markerLayer = null;
 let categoryChart = null;
 let eventSource = null;
 let isStreamPaused = false;
@@ -59,8 +57,9 @@ const I18N = {
     kpi_anomaly: "高異常度アラート (≥75%)",
     kpi_anomaly_sub: "Isolation Forest 異常検知",
     kpi_cost: "GCP 月間推定コスト",
-    map_title: "攻撃元ジオロケーションマップ",
-    map_sub: "ip-api.com バッチ解決",
+    country_panel_title: "観測国・国旗一覧",
+    country_panel_sub: "IPから解決した国名・国旗",
+    no_countries: "表示対象の国データがありません",
     chart_title: "ML 攻撃カテゴリ分布",
     country_rank_title: "国別攻撃ランキング (Top 10)",
     ip_rank_title: "攻撃元 IP / ISP ランキング (Top 10)",
@@ -71,25 +70,22 @@ const I18N = {
     th_isp: "ISP / 組織",
     th_tactic: "主な手口",
     th_times: "回数",
-    stream_title: "リアルタイム攻撃検知ストリーム（全観測ログ常時表示）",
-    search_placeholder: "IP・国・ISP・ペイロードで検索（例: 91.92.40.12）",
+    stream_title: "リアルタイム攻撃検知ストリーム（攻撃内容・ML/統計根拠付き）",
+    search_placeholder: "IP・国・ISP・攻撃内容・ペイロードで検索（例: 91.92.40.12）",
     clear_btn: "クリア",
     sse_note: "SSE プッシュ配信（3秒間隔）",
     th_time: "時刻 (UTC)",
     th_source: "攻撃元",
     th_ml: "ML分類",
     th_anomaly: "AI異常度",
-    th_payload: "リクエスト / ペイロード詳細",
+    th_payload: "攻撃内容・分析根拠・ペイロード詳細",
     countries_observed: (n) => `${n} ヶ国から観測`,
     quota_label: (pct) => `Logging無料枠消化率: ${pct}%`,
     updated_label: (t) => `リアルタイム受信: ${t}`,
     filtered_label: (shown, total) => `表示中: ${shown} / ${total} 件`,
     all_label: (total) => `全 ${total} 件`,
     ip_row_title: "クリックでこのIPをストリーム検索",
-    popup_ip: "IP",
-    popup_isp: "ISP",
-    popup_count: "検知数",
-    popup_tactic: "手口",
+    country_chip_title: "クリックでこの国をストリーム検索",
     unit_count: "件",
   },
   en: {
@@ -112,8 +108,9 @@ const I18N = {
     kpi_anomaly: "High Anomaly Alerts (≥75%)",
     kpi_anomaly_sub: "Isolation Forest detection",
     kpi_cost: "Est. Monthly GCP Cost",
-    map_title: "Source Geolocation Map",
-    map_sub: "ip-api.com batch lookup",
+    country_panel_title: "Observed Countries & Flags",
+    country_panel_sub: "Flags & country names resolved from IPs",
+    no_countries: "No country data available",
     chart_title: "ML Attack Categories",
     country_rank_title: "Top Countries (Top 10)",
     ip_rank_title: "Top Source IPs / ISPs (Top 10)",
@@ -124,25 +121,22 @@ const I18N = {
     th_isp: "ISP / Organization",
     th_tactic: "Top Tactic",
     th_times: "Hits",
-    stream_title: "Live Attack Detection Stream (All Observed Logs)",
-    search_placeholder: "Filter by IP, country, ISP, or payload (e.g. 91.92.40.12)",
+    stream_title: "Live Attack Detection Stream (With Attack Summary & ML/Stats Basis)",
+    search_placeholder: "Filter by IP, country, ISP, attack summary, or payload",
     clear_btn: "Clear",
     sse_note: "SSE push stream (3s interval)",
     th_time: "Time (UTC)",
     th_source: "Source",
     th_ml: "ML Class",
     th_anomaly: "Anomaly",
-    th_payload: "Request / Payload Details",
+    th_payload: "Attack Summary, Analysis Basis & Payload",
     countries_observed: (n) => `Observed across ${n} ${n === 1 ? "country" : "countries"}`,
     quota_label: (pct) => `Logging free tier usage: ${pct}%`,
     updated_label: (t) => `Live update: ${t}`,
     filtered_label: (shown, total) => `Showing: ${shown} / ${total}`,
     all_label: (total) => `Total: ${total}`,
     ip_row_title: "Click to filter stream by this IP",
-    popup_ip: "IP",
-    popup_isp: "ISP",
-    popup_count: "Events",
-    popup_tactic: "Tactic",
+    country_chip_title: "Click to filter stream by this country",
     unit_count: "",
   },
 };
@@ -157,8 +151,8 @@ function sanitizeText(val, fallback = "", maxLen = 1000) {
   return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
 }
 
-function toSafeText(val, fallback = "") {
-  return sanitizeText(val, fallback, 1000);
+function toSafeText(val, fallback = "", maxLen = 1000) {
+  return sanitizeText(val, fallback, maxLen);
 }
 
 function getValidatedHours() {
@@ -237,6 +231,34 @@ function getAnomalyBadgeClass(score) {
   return getSafeBadgeClass("badge-info");
 }
 
+function getCountryLabel(item) {
+  if (!item || typeof item !== "object") return "Unknown";
+  if (currentLang === "en") {
+    return toSafeText(item.country_en || item.country || item.country_ja, "Unknown", 100);
+  }
+  return toSafeText(item.country_ja || item.country || item.country_en, "不明", 100);
+}
+
+function getAttackSummaryText(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  if (currentLang === "en") {
+    return toSafeText(ev.attack_summary_en || ev.attack_summary, "", 260);
+  }
+  return toSafeText(ev.attack_summary || ev.attack_summary_en, "", 260);
+}
+
+function applySearchFilter(queryText) {
+  const input = document.getElementById("ip-search-input");
+  const normalized = sanitizeText(queryText || "", "", 200);
+  if (input) {
+    input.value = normalized;
+  }
+  searchQuery = normalized;
+  if (latestData) {
+    scheduleRenderTables(latestData);
+  }
+}
+
 function applyLanguage(lang) {
   currentLang = lang === "en" ? "en" : "ja";
   writeStoredLang(currentLang);
@@ -282,99 +304,104 @@ function applyLanguage(lang) {
   }
 }
 
-function initMap() {
-  const mapEl = document.getElementById("attack-map");
-  if (!mapEl || typeof L === "undefined") return;
-  if (mapInstance) return;
+function renderCountryFlagsList(topCountries, timeline) {
+  const container = document.getElementById("country-flags-list");
+  if (!container) return;
 
-  mapInstance = L.map("attack-map", {
-    center: [25, 15],
-    zoom: 2,
-    worldCopyJump: true,
-  });
+  const aggregated = new Map();
 
-  const tileLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "&copy; OpenStreetMap contributors",
-    maxZoom: 19,
-  });
-  tileLayer.on("tileerror", () => {
-    // 外部タイル取得失敗時もダッシュボード全体を止めない
-  });
-  tileLayer.addTo(mapInstance);
+  if (Array.isArray(topCountries)) {
+    topCountries.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const countryJa = toSafeText(item.country_ja, "").trim();
+      const countryEn = toSafeText(item.country_en || item.country, "").trim();
+      const lowerEn = countryEn.toLowerCase();
+      if (
+        EXCLUDE_GOOGLE_AND_PRIVATE &&
+        (lowerEn.includes("private") ||
+          lowerEn.includes("local") ||
+          countryJa.includes("ローカル") ||
+          countryJa.includes("プライベート"))
+      ) {
+        return;
+      }
+      const key = (countryEn || countryJa || "Unknown").toLowerCase();
+      const cntNum = Number(item.count);
+      const count = Number.isFinite(cntNum) && cntNum >= 0 ? cntNum : 0;
+      const prev = aggregated.get(key);
+      if (!prev) {
+        aggregated.set(key, {
+          flag: toSafeText(item.flag, "🌐", 16),
+          country: toSafeText(item.country, "Unknown", 100),
+          country_ja: countryJa,
+          country_en: countryEn,
+          count,
+        });
+      } else {
+        prev.count += count;
+      }
+    });
+  }
 
-  markerLayer = L.layerGroup().addTo(mapInstance);
-}
+  if (aggregated.size === 0) {
+    getAllObservedTimeline(timeline).forEach((ev) => {
+      const countryJa = toSafeText(ev.country_ja, "").trim();
+      const countryEn = toSafeText(ev.country_en || ev.country, "").trim();
+      const key = (countryEn || countryJa || "Unknown").toLowerCase();
+      const prev = aggregated.get(key);
+      if (!prev) {
+        aggregated.set(key, {
+          flag: toSafeText(ev.flag, "🌐", 16),
+          country: toSafeText(ev.country, "Unknown", 100),
+          country_ja: countryJa,
+          country_en: countryEn,
+          count: 1,
+        });
+      } else {
+        prev.count += 1;
+      }
+    });
+  }
 
-function buildPopupElement(pt) {
-  const container = document.createElement("div");
-  container.style.color = "#0f172a";
-  container.style.fontSize = "13px";
-  container.style.lineHeight = "1.4";
+  const list = Array.from(aggregated.values()).sort((a, b) => b.count - a.count);
+  const fragment = document.createDocumentFragment();
 
-  const titleEl = document.createElement("strong");
-  titleEl.textContent = `${toSafeText(pt.flag, "🌐", 16)} ${toSafeText(pt.country, "Unknown", 100)}`;
-  container.appendChild(titleEl);
-  container.appendChild(document.createElement("br"));
+  if (list.length === 0) {
+    fragment.appendChild(createTextEl("p", t("no_countries"), "muted"));
+    container.replaceChildren(fragment);
+    return;
+  }
 
-  const ipLabel = document.createTextNode(`${t("popup_ip")}: `);
-  const ipCode = createTextEl("code", toSafeText(pt.ip, "", 64));
-  container.appendChild(ipLabel);
-  container.appendChild(ipCode);
-  container.appendChild(document.createElement("br"));
+  const grid = document.createElement("div");
+  grid.className = "country-flag-grid";
 
-  const ispLine = document.createTextNode(`${t("popup_isp")}: ${toSafeText(pt.isp, "Unknown ISP", 150)}`);
-  container.appendChild(ispLine);
-  container.appendChild(document.createElement("br"));
+  list.forEach((item) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "country-flag-chip";
+    chip.title = t("country_chip_title");
 
-  const countNum = Number(pt.count);
-  const safeCount = Number.isFinite(countNum) && countNum >= 0 ? countNum : 0;
-  const unit = t("unit_count");
-  const countLabel = document.createTextNode(`${t("popup_count")}: `);
-  const countStrong = createTextEl(
-    "strong",
-    `${safeCount}${unit ? " " + unit : ""}`
-  );
-  container.appendChild(countLabel);
-  container.appendChild(countStrong);
-  container.appendChild(document.createElement("br"));
+    const labelText = getCountryLabel(item);
+    const unit = t("unit_count");
+    chip.appendChild(createTextEl("span", toSafeText(item.flag, "🌐", 16), "country-flag-icon"));
+    chip.appendChild(createTextEl("span", labelText, "country-flag-name"));
+    chip.appendChild(
+      createTextEl(
+        "span",
+        `${item.count.toLocaleString()}${unit ? " " + unit : ""}`,
+        "country-flag-count"
+      )
+    );
 
-  const tacticLine = document.createTextNode(
-    `${t("popup_tactic")}: ${toSafeText(pt.category, "Unknown", 80)}`
-  );
-  container.appendChild(tacticLine);
-
-  return container;
-}
-
-function updateMarkers(points) {
-  if (!markerLayer) return;
-  markerLayer.clearLayers();
-
-  if (!Array.isArray(points)) return;
-
-  points.slice(0, 500).forEach((pt) => {
-    if (!pt || typeof pt !== "object" || isGoogleOrPrivateEntry(pt)) return;
-    const lat = Number(pt.lat);
-    const lon = Number(pt.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
-
-    const countNum = Number(pt.count);
-    const safeCount = Number.isFinite(countNum) && countNum >= 0 ? countNum : 1;
-    const radius = Math.min(22, 6 + safeCount * 2);
-
-    const marker = L.circleMarker([lat, lon], {
-      radius,
-      fillColor: "#f43f5e",
-      color: "#fda4af",
-      weight: 1.5,
-      opacity: 0.9,
-      fillOpacity: 0.55,
+    chip.addEventListener("click", () => {
+      applySearchFilter(labelText);
     });
 
-    marker.bindPopup(buildPopupElement(pt));
-    marker.addTo(markerLayer);
+    grid.appendChild(chip);
   });
+
+  fragment.appendChild(grid);
+  container.replaceChildren(fragment);
 }
 
 function updateCategoryChart(categories) {
@@ -446,8 +473,14 @@ function getFilteredTimeline(timeline) {
     const haystack = [
       ev.ip,
       ev.country,
+      ev.country_ja,
+      ev.country_en,
       ev.isp,
       ev.category,
+      ev.attack_summary,
+      ev.attack_summary_en,
+      ev.analysis_basis,
+      ev.cluster_label,
       ev.method,
       ev.path,
       ev.payload,
@@ -484,7 +517,7 @@ function renderCountryTable(topCountries) {
     const tdRank = createTextEl("td", `#${idx + 1}`);
     const tdCountry = createTextEl(
       "td",
-      `${toSafeText(item.flag, "🌐", 16)} ${toSafeText(item.country, "Unknown", 100)}`
+      `${toSafeText(item.flag, "🌐", 16)} ${getCountryLabel(item)}`
     );
 
     const tdCount = document.createElement("td");
@@ -508,7 +541,7 @@ function renderIpTable(topIps) {
   if (!ipBody) return;
 
   const items = (Array.isArray(topIps) ? topIps : []).filter(
-    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
+    (item) => item && typeof item !== "object" && !isGoogleOrPrivateEntry(item)
   );
 
   const fragment = document.createDocumentFragment();
@@ -523,7 +556,7 @@ function renderIpTable(topIps) {
 
     const tdCountry = createTextEl(
       "td",
-      `${toSafeText(item.flag, "🌐", 16)} ${toSafeText(item.country, "Unknown", 100)}`
+      `${toSafeText(item.flag, "🌐", 16)} ${getCountryLabel(item)}`
     );
     const tdIsp = createTextEl("td", toSafeText(item.isp, "Unknown ISP", 150));
 
@@ -541,10 +574,7 @@ function renderIpTable(topIps) {
     );
 
     tr.addEventListener("click", () => {
-      const input = document.getElementById("ip-search-input");
-      if (input) input.value = ipStr;
-      searchQuery = ipStr;
-      if (latestData) scheduleRenderTables(latestData);
+      applySearchFilter(ipStr);
     });
 
     tr.appendChild(tdIp);
@@ -583,6 +613,8 @@ function renderTimelineTable(timeline) {
     const methodStr = toSafeText(ev.method, "GET", 20);
     const payloadStr = toSafeText(ev.payload, "", 400);
     const categoryStr = toSafeText(ev.category, "Unknown", 80);
+    const summaryStr = getAttackSummaryText(ev);
+    const basisStr = toSafeText(ev.analysis_basis, "", 240);
     const scoreNum = Number(ev.anomaly_score);
     const safeScore = Number.isFinite(scoreNum)
       ? Math.max(0, Math.min(100, Math.round(scoreNum)))
@@ -607,7 +639,9 @@ function renderTimelineTable(timeline) {
 
     const tdSource = document.createElement("td");
     tdSource.appendChild(
-      document.createTextNode(`${toSafeText(ev.flag, "🌐", 16)} `)
+      document.createTextNode(
+        `${toSafeText(ev.flag, "🌐", 16)} ${getCountryLabel(ev)} `
+      )
     );
     tdSource.appendChild(createTextEl("code", ipStr));
     tdSource.appendChild(document.createElement("br"));
@@ -624,6 +658,14 @@ function renderTimelineTable(timeline) {
     );
 
     const tdPayload = document.createElement("td");
+    if (summaryStr) {
+      tdPayload.appendChild(createTextEl("strong", summaryStr, "attack-summary-text"));
+      tdPayload.appendChild(document.createElement("br"));
+    }
+    if (basisStr) {
+      tdPayload.appendChild(createTextEl("span", basisStr, "muted analysis-basis-text"));
+      tdPayload.appendChild(document.createElement("br"));
+    }
     tdPayload.appendChild(createTextEl("code", reqPreview));
 
     tr.appendChild(tdTime);
@@ -640,6 +682,7 @@ function renderTimelineTable(timeline) {
 
 function renderTables(data) {
   if (!data || typeof data !== "object") return;
+  renderCountryFlagsList(data.top_countries, data.timeline);
   renderCountryTable(data.top_countries);
   renderIpTable(data.top_ips);
   renderTimelineTable(data.timeline);
@@ -664,7 +707,8 @@ function computeDerivedStats(data) {
 
   observedTimeline.forEach((ev) => {
     if (ev.ip) ipSet.add(toSafeText(ev.ip, "", 64));
-    if (ev.country) countrySet.add(toSafeText(ev.country, "", 100));
+    const cLabel = toSafeText(ev.country_en || ev.country || ev.country_ja, "", 100);
+    if (cLabel) countrySet.add(cLabel);
     const cat = toSafeText(ev.category, "Unknown", 80);
     categories[cat] = (categories[cat] || 0) + 1;
     if (Number(ev.anomaly_score) >= 75) {
@@ -714,7 +758,7 @@ function applyDashboardData(data) {
   document.getElementById("kpi-quota").textContent =
     I18N[currentLang].quota_label(quotaPct);
 
-  updateMarkers(data.map_points);
+  renderCountryFlagsList(data.top_countries, data.timeline);
   updateCategoryChart(derived.categories);
   scheduleRenderTables(data);
 
@@ -803,15 +847,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   applyLanguage(currentLang);
 
-  if (document.getElementById("attack-map")) {
-    initMap();
+  if (
+    document.getElementById("country-flags-list") ||
+    document.getElementById("timeline-table-body")
+  ) {
     connectStream();
-
-    window.addEventListener("resize", () => {
-      if (mapInstance) {
-        mapInstance.invalidateSize();
-      }
-    });
 
     const refreshBtn = document.getElementById("refresh-btn");
     if (refreshBtn) refreshBtn.addEventListener("click", fetchOnce);
@@ -863,9 +903,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (clearBtn) {
       clearBtn.addEventListener("click", () => {
-        if (searchInput) searchInput.value = "";
-        searchQuery = "";
-        if (latestData) scheduleRenderTables(latestData);
+        applySearchFilter("");
       });
     }
 

@@ -5,16 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' https://unpkg.com; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"
+    content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"
   />
   <title>Honeypot Threat Intelligence Dashboard (Realtime)</title>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin="anonymous"
-    referrerpolicy="no-referrer"
-  />
   <link rel="icon" type="image/png" href="/static/AIWeb.png" />
   <link rel="apple-touch-icon" href="/static/AIWeb.png?v=1" />
   <link rel="stylesheet" href="/static/style.css" />
@@ -73,13 +66,13 @@
       </div>
     </section>
 
-    <section class="main-grid" aria-label="Geolocation and category analytics">
+    <section class="main-grid" aria-label="Observed countries and category analytics">
       <div class="card map-card">
         <div class="card-header">
-          <h2 data-i18n="map_title">攻撃元ジオロケーションマップ</h2>
-          <span class="muted" data-i18n="map_sub">ip-api.com バッチ解決</span>
+          <h2 data-i18n="country_panel_title">観測国・国旗一覧</h2>
+          <span class="muted" data-i18n="country_panel_sub">IPから解決した国名・国旗</span>
         </div>
-        <div id="attack-map" role="region" aria-label="Attack source map"></div>
+        <div id="country-flags-list" role="region" aria-label="Observed countries and flags"></div>
       </div>
 
       <div class="card chart-card">
@@ -168,12 +161,6 @@
     </section>
   </main>
 
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin="anonymous"
-    referrerpolicy="no-referrer"
-  ></script>
   <script
     src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
     integrity="sha384-vsrfeLOuz6DaIGIoN+hN6/uDydFtW4aSOmGrG8ftNGamezHGwRcVmzdGSsrydLC+"
