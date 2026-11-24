@@ -9,6 +9,12 @@ let renderRafId = null;
 const EXCLUDE_GOOGLE_AND_PRIVATE = true;
 const MAX_SEEN_EVENT_IDS = 100000;
 const ALLOWED_HOURS = new Set([6, 24, 72, 168]);
+const DEFAULT_LIMIT = 500;
+const MAX_LIMIT = 2000;
+const RECONNECT_BASE_DELAY_MS = 3000;
+const RECONNECT_MAX_DELAY_MS = 30000;
+let reconnectTimerId = null;
+let reconnectAttempt = 0;
 const ALLOWED_BADGE_CLASSES = new Set([
   "badge-danger",
   "badge-purple",
@@ -541,7 +547,7 @@ function renderIpTable(topIps) {
   if (!ipBody) return;
 
   const items = (Array.isArray(topIps) ? topIps : []).filter(
-    (item) => item && typeof item !== "object" && !isGoogleOrPrivateEntry(item)
+    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
   );
 
   const fragment = document.createDocumentFragment();
@@ -771,11 +777,18 @@ function applyDashboardData(data) {
   }
 }
 
+function getClampedLimit(rawLimit = DEFAULT_LIMIT) {
+  const num = Number(rawLimit);
+  if (!Number.isFinite(num)) return DEFAULT_LIMIT;
+  return Math.max(1, Math.min(MAX_LIMIT, Math.round(num)));
+}
+
 async function fetchOnce() {
   const hours = getValidatedHours();
+  const limit = getClampedLimit(DEFAULT_LIMIT);
   try {
     const res = await fetch(
-      `/api/stats?hours=${encodeURIComponent(hours)}&limit=50000`,
+      `/api/stats?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`,
       { cache: "no-store" }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -788,11 +801,35 @@ async function fetchOnce() {
   }
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimerId !== null) {
+    clearTimeout(reconnectTimerId);
+    reconnectTimerId = null;
+  }
+}
+
+function scheduleReconnect() {
+  clearReconnectTimer();
+  if (isStreamPaused) return;
+  const delay = Math.min(
+    RECONNECT_MAX_DELAY_MS,
+    RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(reconnectAttempt, 4))
+  );
+  reconnectAttempt += 1;
+  reconnectTimerId = setTimeout(() => {
+    reconnectTimerId = null;
+    if (!isStreamPaused) {
+      connectStream();
+    }
+  }, delay);
+}
+
 function connectStream() {
   disconnectStream();
   if (isStreamPaused) return;
 
   const hours = getValidatedHours();
+  const limit = getClampedLimit(DEFAULT_LIMIT);
   const streamBadge = document.getElementById("stream-badge");
   const liveDot = document.getElementById("live-dot");
 
@@ -801,12 +838,14 @@ function connectStream() {
     streamBadge.className = "badge badge-info";
   }
 
-  eventSource = new EventSource(
-    `/api/stream?hours=${encodeURIComponent(hours)}&limit=50000`
+  const source = new EventSource(
+    `/api/stream?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`
   );
+  eventSource = source;
 
-  eventSource.addEventListener("stats", (event) => {
-    if (isStreamPaused) return;
+  source.addEventListener("stats", (event) => {
+    if (isStreamPaused || eventSource !== source) return;
+    reconnectAttempt = 0;
     if (streamBadge) {
       streamBadge.textContent = "SSE LIVE";
       streamBadge.className = "badge badge-success";
@@ -823,16 +862,31 @@ function connectStream() {
     }
   });
 
-  eventSource.onerror = () => {
+  source.addEventListener("end", () => {
+    if (eventSource !== source) return;
+    source.close();
+    eventSource = null;
+    reconnectAttempt = 0;
+    if (!isStreamPaused) {
+      scheduleReconnect();
+    }
+  });
+
+  source.onerror = () => {
+    if (eventSource !== source) return;
+    source.close();
+    eventSource = null;
     if (streamBadge) {
       streamBadge.textContent = "RECONNECTING";
       streamBadge.className = "badge badge-warning";
     }
     if (liveDot) liveDot.classList.add("paused");
+    scheduleReconnect();
   };
 }
 
 function disconnectStream() {
+  clearReconnectTimer();
   if (eventSource) {
     eventSource.close();
     eventSource = null;
