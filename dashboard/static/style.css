@@ -260,6 +260,55 @@ button:hover {
   gap: 6px;
 }
 
+.arch-box li .country-flag-chip {
+  min-height: 30px;
+  padding: 4px 10px;
+}
+
+.country-flag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.country-flag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  min-height: 32px;
+  border-radius: 8px;
+  background-color: var(--bg-main);
+  border: 1px solid var(--border-color);
+  font-size: 0.82rem;
+}
+
+.country-flag-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.country-flag-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.country-flag-count {
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.attack-summary-text {
+  color: var(--text-primary);
+  font-size: 0.86rem;
+}
+
+.analysis-basis-text {
+  display: inline-block;
+  font-size: 0.76rem;
+}
+
 .muted {
   color: var(--text-muted);
   font-size: 0.8rem;

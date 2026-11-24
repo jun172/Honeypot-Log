@@ -8,9 +8,9 @@ let renderRafId = null;
 
 const EXCLUDE_GOOGLE_AND_PRIVATE = true;
 const MAX_SEEN_EVENT_IDS = 100000;
-const ALLOWED_HOURS = new Set([6, 24, 72, 168]);
-const DEFAULT_LIMIT = 500;
-const MAX_LIMIT = 2000;
+const ALLOWED_HOURS = new Set([6, 24, 72, 168, 8760]);
+const DEFAULT_LIMIT = 2000;
+const MAX_LIMIT = 10000;
 const RECONNECT_BASE_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 let reconnectTimerId = null;
@@ -52,21 +52,29 @@ const I18N = {
     period_24h: "直近 24時間",
     period_72h: "直近 3日間",
     period_168h: "直近 7日間",
+    period_all: "全期間 (All)",
     pause_btn: "一時停止",
     resume_btn: "再開",
     refresh_btn: "即時取得",
     connecting: "ストリーム接続中...",
     fetch_error: "取得エラー",
-    kpi_total: "総検知イベント数",
-    kpi_total_sub: "観測ログ全件表示中",
+    kpi_total: "総検知イベント数 (異常度≥80%)",
+    kpi_total_sub: "高異常度攻撃ログを表示中",
     kpi_ips: "攻撃元ユニークIP",
-    kpi_anomaly: "高異常度アラート (≥75%)",
-    kpi_anomaly_sub: "Isolation Forest 異常検知",
+    kpi_anomaly: "高異常度アラート (≥80%)",
+    kpi_anomaly_sub: "Isolation Forest + 教師なしクラスタ",
     kpi_cost: "GCP 月間推定コスト",
     country_panel_title: "観測国・国旗一覧",
     country_panel_sub: "IPから解決した国名・国旗",
     no_countries: "表示対象の国データがありません",
     chart_title: "ML 攻撃カテゴリ分布",
+    analytics_panel_title: "右側分析サマリー（クラスタ・攻撃手口・標的パス）",
+    analytics_panel_sub: "教師なしクラスタリング & 異常度≥80%詳細",
+    clusters_title: "教師なしクラスタ分布",
+    tactics_title: "主な攻撃手口 (Top 6)",
+    paths_title: "標的エンドポイント (Top 6)",
+    high80_title: "高異常度イベント抜粋 (≥80%)",
+    no_analytics_data: "集計対象データがありません",
     country_rank_title: "国別攻撃ランキング (Top 10)",
     ip_rank_title: "攻撃元 IP / ISP ランキング (Top 10)",
     th_rank: "順位",
@@ -77,12 +85,12 @@ const I18N = {
     th_tactic: "主な手口",
     th_times: "回数",
     stream_title: "リアルタイム攻撃検知ストリーム（攻撃内容・ML/統計根拠付き）",
-    search_placeholder: "IP・国・ISP・攻撃内容・ペイロードで検索（例: 91.92.40.12）",
+    search_placeholder: "IP・国・ISP・クラスタ・攻撃内容・ペイロードで検索（例: 91.92.40.12）",
     clear_btn: "クリア",
     sse_note: "SSE プッシュ配信（3秒間隔）",
     th_time: "時刻 (UTC)",
     th_source: "攻撃元",
-    th_ml: "ML分類",
+    th_ml: "ML分類 / クラスタ",
     th_anomaly: "AI異常度",
     th_payload: "攻撃内容・分析根拠・ペイロード詳細",
     countries_observed: (n) => `${n} ヶ国から観測`,
@@ -92,6 +100,7 @@ const I18N = {
     all_label: (total) => `全 ${total} 件`,
     ip_row_title: "クリックでこのIPをストリーム検索",
     country_chip_title: "クリックでこの国をストリーム検索",
+    cluster_chip_title: "クリックでこのクラスタをストリーム検索",
     unit_count: "件",
   },
   en: {
@@ -103,21 +112,29 @@ const I18N = {
     period_24h: "Last 24 Hours",
     period_72h: "Last 3 Days",
     period_168h: "Last 7 Days",
+    period_all: "All History",
     pause_btn: "Pause",
     resume_btn: "Resume",
     refresh_btn: "Refresh Now",
     connecting: "Connecting stream...",
     fetch_error: "Fetch error",
-    kpi_total: "Total Detected Events",
-    kpi_total_sub: "Showing all observed logs",
+    kpi_total: "Total Detected Events (≥80%)",
+    kpi_total_sub: "Showing high-anomaly attack logs",
     kpi_ips: "Unique Source IPs",
-    kpi_anomaly: "High Anomaly Alerts (≥75%)",
-    kpi_anomaly_sub: "Isolation Forest detection",
+    kpi_anomaly: "High Anomaly Alerts (≥80%)",
+    kpi_anomaly_sub: "Isolation Forest + Unsupervised Clusters",
     kpi_cost: "Est. Monthly GCP Cost",
     country_panel_title: "Observed Countries & Flags",
     country_panel_sub: "Flags & country names resolved from IPs",
     no_countries: "No country data available",
     chart_title: "ML Attack Categories",
+    analytics_panel_title: "Analytics Summary (Clusters, Tactics & Target Paths)",
+    analytics_panel_sub: "Unsupervised Clustering & Anomaly ≥80% Details",
+    clusters_title: "Unsupervised Clusters",
+    tactics_title: "Top Attack Tactics (Top 6)",
+    paths_title: "Top Target Endpoints (Top 6)",
+    high80_title: "High Anomaly Events (≥80%)",
+    no_analytics_data: "No analytics data available",
     country_rank_title: "Top Countries (Top 10)",
     ip_rank_title: "Top Source IPs / ISPs (Top 10)",
     th_rank: "Rank",
@@ -128,12 +145,12 @@ const I18N = {
     th_tactic: "Top Tactic",
     th_times: "Hits",
     stream_title: "Live Attack Detection Stream (With Attack Summary & ML/Stats Basis)",
-    search_placeholder: "Filter by IP, country, ISP, attack summary, or payload",
+    search_placeholder: "Filter by IP, country, ISP, cluster, summary, or payload",
     clear_btn: "Clear",
     sse_note: "SSE push stream (3s interval)",
     th_time: "Time (UTC)",
     th_source: "Source",
-    th_ml: "ML Class",
+    th_ml: "ML Class / Cluster",
     th_anomaly: "Anomaly",
     th_payload: "Attack Summary, Analysis Basis & Payload",
     countries_observed: (n) => `Observed across ${n} ${n === 1 ? "country" : "countries"}`,
@@ -143,6 +160,7 @@ const I18N = {
     all_label: (total) => `Total: ${total}`,
     ip_row_title: "Click to filter stream by this IP",
     country_chip_title: "Click to filter stream by this country",
+    cluster_chip_title: "Click to filter stream by this cluster",
     unit_count: "",
   },
 };
@@ -163,9 +181,9 @@ function toSafeText(val, fallback = "", maxLen = 1000) {
 
 function getValidatedHours() {
   const hoursEl = document.getElementById("hours-select");
-  if (!hoursEl) return 24;
+  if (!hoursEl) return 8760;
   const parsed = Number(hoursEl.value);
-  return ALLOWED_HOURS.has(parsed) ? parsed : 24;
+  return ALLOWED_HOURS.has(parsed) ? parsed : 8760;
 }
 
 function createTextEl(tagName, text, className = "") {
@@ -410,6 +428,111 @@ function renderCountryFlagsList(topCountries, timeline) {
   container.replaceChildren(fragment);
 }
 
+function renderRightAnalytics(rightAnalytics) {
+  const panel = document.getElementById("right-analytics-panel");
+  if (!panel) return;
+
+  const ra = rightAnalytics && typeof rightAnalytics === "object" ? rightAnalytics : {};
+  const clusters = Array.isArray(ra.cluster_breakdown) ? ra.cluster_breakdown : [];
+  const tactics = Array.isArray(ra.top_tactics) ? ra.top_tactics : [];
+  const paths = Array.isArray(ra.top_paths) ? ra.top_paths : [];
+  const high80 = Array.isArray(ra.above_80_events) ? ra.above_80_events : [];
+
+  if (!clusters.length && !tactics.length && !paths.length && !high80.length) {
+    panel.replaceChildren(createTextEl("p", t("no_analytics_data"), "muted"));
+    return;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "arch-grid";
+
+  const clusterBox = document.createElement("div");
+  clusterBox.className = "arch-box";
+  clusterBox.appendChild(createTextEl("h3", t("clusters_title")));
+  if (clusters.length) {
+    const ul = document.createElement("ul");
+    clusters.slice(0, 6).forEach((cl) => {
+      const li = document.createElement("li");
+      const label = toSafeText(cl.label, "Cluster", 100);
+      const cnt = Number(cl.count) || 0;
+      const share = Number(cl.share_pct) || 0;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "country-flag-chip";
+      btn.title = t("cluster_chip_title");
+      btn.appendChild(createTextEl("span", label, "country-flag-name"));
+      btn.appendChild(createTextEl("span", `${cnt.toLocaleString()} (${share}%)`, "country-flag-count"));
+      btn.addEventListener("click", () => applySearchFilter(label));
+      li.appendChild(btn);
+      ul.appendChild(li);
+    });
+    clusterBox.appendChild(ul);
+  } else {
+    clusterBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
+  }
+  grid.appendChild(clusterBox);
+
+  const tacticBox = document.createElement("div");
+  tacticBox.className = "arch-box";
+  tacticBox.appendChild(createTextEl("h3", t("tactics_title")));
+  if (tactics.length) {
+    const ul = document.createElement("ul");
+    tactics.slice(0, 6).forEach((tc) => {
+      const li = document.createElement("li");
+      const name = toSafeText(tc.tactic, "Unknown", 100);
+      const cnt = Number(tc.count) || 0;
+      const share = Number(tc.share_pct) || 0;
+      li.textContent = `${name} — ${cnt.toLocaleString()} (${share}%)`;
+      ul.appendChild(li);
+    });
+    tacticBox.appendChild(ul);
+  } else {
+    tacticBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
+  }
+  grid.appendChild(tacticBox);
+
+  const pathBox = document.createElement("div");
+  pathBox.className = "arch-box";
+  pathBox.appendChild(createTextEl("h3", t("paths_title")));
+  if (paths.length) {
+    const ul = document.createElement("ul");
+    paths.slice(0, 6).forEach((p) => {
+      const li = document.createElement("li");
+      const ep = toSafeText(p.endpoint, "/", 120);
+      const cnt = Number(p.count) || 0;
+      li.appendChild(createTextEl("code", ep));
+      li.appendChild(document.createTextNode(` (${cnt.toLocaleString()})`));
+      ul.appendChild(li);
+    });
+    pathBox.appendChild(ul);
+  } else {
+    pathBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
+  }
+  grid.appendChild(pathBox);
+
+  const highBox = document.createElement("div");
+  highBox.className = "arch-box";
+  highBox.appendChild(createTextEl("h3", `${t("high80_title")} (${Number(ra.above_80_count) || 0})`));
+  if (high80.length) {
+    const ul = document.createElement("ul");
+    high80.slice(0, 5).forEach((ev) => {
+      const li = document.createElement("li");
+      const ip = toSafeText(ev.ip, "", 64);
+      const score = Number(ev.anomaly_score) || 0;
+      const sum = toSafeText(ev.attack_summary || ev.category, "", 120);
+      li.appendChild(createTextEl("code", ip));
+      li.appendChild(document.createTextNode(` [${score}%] ${sum}`));
+      ul.appendChild(li);
+    });
+    highBox.appendChild(ul);
+  } else {
+    highBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
+  }
+  grid.appendChild(highBox);
+
+  panel.replaceChildren(grid);
+}
+
 function updateCategoryChart(categories) {
   const canvas = document.getElementById("category-chart");
   if (!canvas || typeof Chart === "undefined") return;
@@ -619,6 +742,7 @@ function renderTimelineTable(timeline) {
     const methodStr = toSafeText(ev.method, "GET", 20);
     const payloadStr = toSafeText(ev.payload, "", 400);
     const categoryStr = toSafeText(ev.category, "Unknown", 80);
+    const clusterStr = toSafeText(ev.cluster_label, "", 100);
     const summaryStr = getAttackSummaryText(ev);
     const basisStr = toSafeText(ev.analysis_basis, "", 240);
     const scoreNum = Number(ev.anomaly_score);
@@ -657,6 +781,10 @@ function renderTimelineTable(timeline) {
     tdMl.appendChild(
       createTextEl("span", categoryStr, `badge ${getCategoryBadgeClass(categoryStr)}`)
     );
+    if (clusterStr) {
+      tdMl.appendChild(document.createElement("br"));
+      tdMl.appendChild(createTextEl("span", clusterStr, "muted"));
+    }
 
     const tdAnomaly = document.createElement("td");
     tdAnomaly.appendChild(
@@ -689,6 +817,7 @@ function renderTimelineTable(timeline) {
 function renderTables(data) {
   if (!data || typeof data !== "object") return;
   renderCountryFlagsList(data.top_countries, data.timeline);
+  renderRightAnalytics(data.right_analytics);
   renderCountryTable(data.top_countries);
   renderIpTable(data.top_ips);
   renderTimelineTable(data.timeline);
@@ -717,7 +846,7 @@ function computeDerivedStats(data) {
     if (cLabel) countrySet.add(cLabel);
     const cat = toSafeText(ev.category, "Unknown", 80);
     categories[cat] = (categories[cat] || 0) + 1;
-    if (Number(ev.anomaly_score) >= 75) {
+    if (Number(ev.anomaly_score) >= 80) {
       highAnomalyCount += 1;
     }
   });
@@ -765,6 +894,7 @@ function applyDashboardData(data) {
     I18N[currentLang].quota_label(quotaPct);
 
   renderCountryFlagsList(data.top_countries, data.timeline);
+  renderRightAnalytics(data.right_analytics);
   updateCategoryChart(derived.categories);
   scheduleRenderTables(data);
 
