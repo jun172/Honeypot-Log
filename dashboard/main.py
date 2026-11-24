@@ -472,10 +472,33 @@ def render_category_chart_png(categories: dict[str, int], title: str = "ML Attac
 
 
 # ==========================================
-# AI分析（教師あり分類 + 異常検知 + 教師なしクラスタリング）
+# AI分析（教師あり分類 + 異常検知 + 教師なしクラスタリング + 分かりやすい攻撃解説）
 # ==========================================
 CLASSIFIER_PIPELINE: Pipeline | None = None
 ANOMALY_MODEL: IsolationForest | None = None
+
+CATEGORY_JA_EXPLANATIONS: dict[str, tuple[str, str]] = {
+    "RCE / Command Injection": (
+        "外部からOSコマンドやスクリプトを実行しようとする遠隔コード実行（RCE）・コマンド注入の疑い",
+        "Remote code execution / command injection attempt",
+    ),
+    "Credential / Env Theft": (
+        ".env・秘密鍵・認証情報や設定ファイルなどを探索して奪取しようとする認証情報窃取の疑い",
+        "Credential or environment/secret file probing",
+    ),
+    "CMS / Admin Brute Force": (
+        "管理画面やログインエンドポイントへの総当たり・認証突破試行の疑い",
+        "Admin or CMS login brute-force attempt",
+    ),
+    "SQLi / XSS Probe": (
+        "SQLインジェクション・クロスサイトスクリプティング（XSS）・パストラバーサルなどのWeb脆弱性探索の疑い",
+        "SQL injection, XSS, or path traversal probe",
+    ),
+    "Automated Recon / Scanner": (
+        "自動スキャナーやプロトコル探索・事前偵察（Recon）によるリクエスト",
+        "Automated scanner or reconnaissance probe",
+    ),
+}
 
 
 def init_ml_models() -> None:
@@ -858,7 +881,7 @@ def classify_and_score(
     user_agent: str,
     raw_request_line: str = "",
     header_count: int = 6,
-) -> tuple[str, float, int]:
+) -> tuple[str, float, int, dict[str, Any]]:
     classifier, detector = _get_ready_models()
 
     signal_text = f"{event_type} {method} {path} {payload} {raw_request_line} {user_agent}".strip()[:4096]
@@ -951,8 +974,13 @@ def classify_and_score(
         confidence = max(confidence, 72.0)
 
     special_chars = len(re.findall(r"['\";|<>$`\\{}\[\]\.\./]", f"{path} {payload} {raw_request_line}"[:4096]))
+    entropy = _shannon_entropy(f"{path} {payload}"[:2048])
+    path_len = min(len(path), 4096)
+    payload_len = min(len(payload), 8192)
+    safe_headers = max(0, min(_safe_int(header_count, 6), 200))
+
     features = np.array(
-        [[min(len(path), 4096), min(len(payload), 8192), max(0, min(_safe_int(header_count, 6), 200)), special_chars]],
+        [[path_len, payload_len, safe_headers, special_chars]],
         dtype=np.float64,
     )
     raw_score = float(detector.decision_function(features)[0])
@@ -965,7 +993,76 @@ def classify_and_score(
     elif category == "Automated Recon / Scanner":
         anomaly_pct = min(anomaly_pct, 45)
 
-    return category, confidence, anomaly_pct
+    stats_meta = {
+        "path_len": path_len,
+        "payload_len": payload_len,
+        "header_count": safe_headers,
+        "special_chars": special_chars,
+        "entropy": entropy,
+    }
+    return category, confidence, anomaly_pct, stats_meta
+
+
+def build_attack_explanation(
+    category: str,
+    confidence: float,
+    anomaly_score: int,
+    cluster_label: str,
+    stats_meta: dict[str, Any],
+    cluster_features: dict[str, Any] | None = None,
+) -> tuple[str, str, str]:
+    """ML分類・異常検知・クラスタ・統計特徴量から、分かりやすい攻撃説明文を生成する。"""
+    ja_desc, en_desc = CATEGORY_JA_EXPLANATIONS.get(
+        category,
+        (
+            "通常通信とは異なる不審なリクエストパターンの疑い",
+            "Suspicious request pattern differing from normal baseline",
+        ),
+    )
+
+    c_feat = cluster_features or {}
+    entropy = _safe_float(stats_meta.get("entropy", c_feat.get("entropy", 0.0)), 0.0)
+    special_chars = _safe_int(stats_meta.get("special_chars", 0), 0)
+    payload_len = _safe_int(stats_meta.get("payload_len", 0), 0)
+    non_ascii_ratio = _safe_float(c_feat.get("non_ascii_ratio", 0.0), 0.0)
+    burst_cnt = _safe_int(c_feat.get("host_burst_count", 1), 1)
+
+    reasons_ja: list[str] = []
+    reasons_en: list[str] = []
+
+    if special_chars >= 4:
+        reasons_ja.append(f"記号・メタ文字{special_chars}個を検出")
+        reasons_en.append(f"{special_chars} special/meta chars")
+    if entropy >= 4.8:
+        reasons_ja.append(f"エントロピー高({entropy})")
+        reasons_en.append(f"high entropy({entropy})")
+    if non_ascii_ratio >= 0.15:
+        reasons_ja.append(f"非ASCII文字比率{round(non_ascii_ratio * 100, 1)}%")
+        reasons_en.append(f"non-ASCII {round(non_ascii_ratio * 100, 1)}%")
+    if payload_len >= 256:
+        reasons_ja.append(f"ペイロード長{payload_len}B")
+        reasons_en.append(f"payload {payload_len}B")
+    if burst_cnt >= 2:
+        reasons_ja.append(f"同一宛先バースト({burst_cnt}件)")
+        reasons_en.append(f"host burst({burst_cnt})")
+
+    if not reasons_ja:
+        reasons_ja.append(f"文字長・構造の偏差(異常度{anomaly_score}%)")
+        reasons_en.append(f"length/structure deviation(anomaly {anomaly_score}%)")
+
+    attack_summary = sanitize_display_text(
+        f"{ja_desc}（{' / '.join(reasons_ja)}）",
+        max_len=260,
+    )
+    attack_summary_en = sanitize_display_text(
+        f"{en_desc} ({', '.join(reasons_en)})",
+        max_len=260,
+    )
+    analysis_basis = sanitize_display_text(
+        f"ML:{category}[確信度{confidence:.1f}%] | IsolationForest:異常度{anomaly_score}% | 群:{cluster_label}",
+        max_len=240,
+    )
+    return attack_summary, attack_summary_en, analysis_basis
 
 
 def _is_anomalous_event(category: str, anomaly_score: int, event_type: str = "") -> bool:
@@ -1798,7 +1895,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     raw_records, is_demo_mode = await fetch_logs_async(hours=hours, limit=effective_limit)
     geo_map = await resolve_geoip_batch([r["ip"] for r in raw_records])
 
-    anomalous_items: list[tuple[dict[str, Any], dict[str, Any], str, str, float, int]] = []
+    anomalous_items: list[tuple[dict[str, Any], dict[str, Any], str, str, float, int, dict[str, Any]]] = []
     host_counter: Counter[str] = Counter()
 
     for rec in raw_records:
@@ -1814,7 +1911,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         if SKIP_JAPAN_IPS and _is_japan_geo(geo):
             continue
 
-        category, confidence, anomaly_score = classify_and_score(
+        category, confidence, anomaly_score, stats_meta = classify_and_score(
             event_type=rec.get("event_type", "request"),
             method=rec["method"],
             path=rec["path"],
@@ -1832,7 +1929,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         if host:
             host_counter[host] += 1
 
-        anomalous_items.append((rec, geo, display_country, category, confidence, anomaly_score))
+        anomalous_items.append((rec, geo, display_country, category, confidence, anomaly_score, stats_meta))
 
     cluster_assignments, cluster_summary = run_unsupervised_clustering(
         [item[0] for item in anomalous_items],
@@ -1845,12 +1942,11 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     ip_counts: dict[str, dict[str, Any]] = {}
     timeline_events: list[dict[str, Any]] = []
     all_json_records: list[dict[str, Any]] = []
-    map_points_dict: dict[str, dict[str, Any]] = {}
 
     total_bytes = 0
     high_anomaly_count = 0
 
-    for idx, (rec, geo, display_country, category, confidence, anomaly_score) in enumerate(anomalous_items):
+    for idx, (rec, geo, display_country, category, confidence, anomaly_score, stats_meta) in enumerate(anomalous_items):
         ip = rec["ip"]
         total_bytes += rec["bytes"]
 
@@ -1861,8 +1957,17 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             "cluster_id": 0,
             "cluster_label": "C1: General",
             "cluster_distance": 0.0,
+            "cluster_features": {},
         }
         cluster_label = cl_info["cluster_label"]
+        attack_summary, attack_summary_en, analysis_basis = build_attack_explanation(
+            category=category,
+            confidence=confidence,
+            anomaly_score=anomaly_score,
+            cluster_label=cluster_label,
+            stats_meta=stats_meta,
+            cluster_features=cl_info.get("cluster_features"),
+        )
 
         category_counts[category] = category_counts.get(category, 0) + 1
         cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
@@ -1894,27 +1999,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "count": 0,
                 "top_category": category,
                 "top_cluster": cluster_label,
+                "top_summary": attack_summary,
             },
         )["count"] += 1
-
-        if geo["lat"] != 0.0 or geo["lon"] != 0.0:
-            map_points_dict.setdefault(
-                ip,
-                {
-                    "ip": ip,
-                    "lat": geo["lat"],
-                    "lon": geo["lon"],
-                    "flag": geo["flag"],
-                    "country": display_country,
-                    "country_ja": geo["country_ja"],
-                    "country_en": geo["country"],
-                    "country_code": geo["country_code"],
-                    "isp": geo["isp"],
-                    "count": 0,
-                    "category": category,
-                    "cluster_label": cluster_label,
-                },
-            )["count"] += 1
 
         if len(timeline_events) < min(MAX_TIMELINE_EVENTS, effective_limit):
             safe_path = sanitize_display_text(rec["path"])
@@ -1942,6 +2029,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "category": category,
                 "confidence": confidence,
                 "anomaly_score": anomaly_score,
+                "attack_summary": attack_summary,
+                "attack_summary_en": attack_summary_en,
+                "analysis_basis": analysis_basis,
                 "cluster_id": cl_info["cluster_id"],
                 "cluster_label": cluster_label,
                 "cluster_distance": cl_info["cluster_distance"],
@@ -1953,9 +2043,13 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                     "timestamp": rec["timestamp"],
                     "source": rec.get("source", "unknown"),
                     "ip": ip,
+                    "flag": geo["flag"],
                     "country": display_country,
                     "category": category,
                     "anomaly_score": anomaly_score,
+                    "attack_summary": attack_summary,
+                    "attack_summary_en": attack_summary_en,
+                    "analysis_basis": analysis_basis,
                     "cluster_id": cl_info["cluster_id"],
                     "cluster_label": cluster_label,
                     "json": rec.get("raw_json"),
@@ -1970,6 +2064,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "only_anomalous": True,
         "hide_automated_recon": HIDE_AUTOMATED_RECON,
         "exclude_audit_and_admin_logs": EXCLUDE_AUDIT_AND_ADMIN_LOGS,
+        "display_mode": "flag_and_country_only",
         "summary": {
             "total_attacks": len(timeline_events),
             "unique_ips": len(ip_counts),
@@ -1982,7 +2077,6 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "cluster_summary": cluster_summary,
         "top_countries": sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "top_ips": sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
-        "map_points": list(map_points_dict.values()),
         "timeline": timeline_events,
         "all_json_records": all_json_records,
         "cost": calculate_gcp_costs(len(timeline_events), total_bytes, hours),
@@ -2026,9 +2120,9 @@ def _build_csp_header(path: str, script_nonce: str) -> str:
         )
     return (
         "default-src 'self'; "
-        "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-        "img-src 'self' data: blob: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; "
+        "script-src 'self' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
         "connect-src 'self'; "
         "font-src 'self' data:; "
         "object-src 'none'; "
