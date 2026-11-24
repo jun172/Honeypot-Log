@@ -6,3 +6,4 @@ numpy==2.2.2
 httpx==0.28.1
 google-cloud-storage==2.19.0
 google-cloud-bigquery
+matplotlib
