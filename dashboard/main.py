@@ -128,7 +128,9 @@ def _env_bool(name: str, default: bool) -> bool:
 # ==========================================
 # 安全上限・キャッシュ・ML設定
 # ==========================================
-MAX_ALLOWED_LIMIT = _env_int("MAX_ALLOWED_LIMIT", 50000, min_val=1, max_val=50000)
+MAX_ALLOWED_LIMIT = _env_int("MAX_ALLOWED_LIMIT", 500, min_val=1, max_val=2000)
+MAX_QUERY_HOURS = _env_int("MAX_QUERY_HOURS", 24, min_val=1, max_val=168)
+MAX_STREAM_DURATION_SEC = _env_float("MAX_STREAM_DURATION_SEC", 45.0, min_val=5.0)
 MAX_LOG_CACHE_ENTRIES = _env_int("MAX_LOG_CACHE_ENTRIES", 128, min_val=1, max_val=2048)
 MAX_GEO_CACHE_ENTRIES = _env_int("MAX_GEO_CACHE_ENTRIES", 10000, min_val=1, max_val=100000)
 MAX_GCS_BLOB_BYTES = _env_int("MAX_GCS_BLOB_BYTES", 50 * 1024 * 1024, min_val=1024)
@@ -1898,9 +1900,10 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
 
 
 async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
-    effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    effective_hours = min(max(int(hours), 1), MAX_QUERY_HOURS)
+    effective_limit = min(max(int(limit), 1), MAX_ALLOWED_LIMIT)
     cache_key = (
-        hours,
+        effective_hours,
         effective_limit,
         tuple(LOG_PROJECTS),
         tuple(LOG_GCS_BUCKETS),
@@ -1932,7 +1935,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             LOG_RESPONSE_CACHE.move_to_end(cache_key)
             return cached_payload
 
-    raw_records, is_demo_mode = await fetch_logs_async(hours=hours, limit=effective_limit)
+    raw_records, is_demo_mode = await fetch_logs_async(hours=effective_hours, limit=effective_limit)
     geo_map = await resolve_geoip_batch([r["ip"] for r in raw_records])
 
     anomalous_items: list[tuple[dict[str, Any], dict[str, Any], str, str, float, int, dict[str, Any]]] = []
@@ -2119,7 +2122,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "top_ips": sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "timeline": timeline_events,
         "all_json_records": all_json_records,
-        "cost": calculate_gcp_costs(len(timeline_events), total_bytes, hours),
+        "cost": calculate_gcp_costs(len(timeline_events), total_bytes, effective_hours),
     }
 
     LOG_RESPONSE_CACHE[cache_key] = (time.monotonic(), payload)
@@ -2213,16 +2216,23 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(status_code=204, headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/api/chart/categories.png")
 async def get_category_chart_png(
-    hours: int = Query(default=24, ge=1, le=720),
-    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
+    hours: int = Query(default=6, ge=1, le=168),
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> Response:
-    payload = await build_stats_payload(hours=hours, limit=limit)
+    safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    payload = await build_stats_payload(hours=safe_hours, limit=safe_limit)
     png_bytes = await asyncio.to_thread(
         render_category_chart_png,
         payload.get("categories", {}),
-        f"ML Attack Category Distribution ({hours}h)",
+        f"ML Attack Category Distribution ({safe_hours}h)",
     )
     return Response(
         content=png_bytes,
@@ -2233,24 +2243,33 @@ async def get_category_chart_png(
 
 @app.get("/api/stats")
 async def get_stats(
-    hours: int = Query(default=24, ge=1, le=720),
-    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
+    hours: int = Query(default=6, ge=1, le=168),
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> dict[str, Any]:
-    return await build_stats_payload(hours=hours, limit=limit)
+    safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    return await build_stats_payload(hours=safe_hours, limit=safe_limit)
 
 
 @app.get("/api/stream")
 async def stream_stats(
     request: Request,
-    hours: int = Query(default=24, ge=1, le=720),
-    limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
+    hours: int = Query(default=6, ge=1, le=168),
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> StreamingResponse:
+    safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    started_at = time.monotonic()
+
     async def event_generator() -> AsyncGenerator[str, None]:
         while True:
             if await request.is_disconnected():
                 break
+            if (time.monotonic() - started_at) >= MAX_STREAM_DURATION_SEC:
+                yield "event: end\ndata: {\"reason\": \"max_duration\"}\n\n"
+                break
             try:
-                payload = await build_stats_payload(hours=hours, limit=limit)
+                payload = await build_stats_payload(hours=safe_hours, limit=safe_limit)
                 data_json = json.dumps(payload, ensure_ascii=False, default=str)
                 yield f"event: stats\ndata: {data_json}\n\n"
             except Exception as exc:
@@ -2258,6 +2277,8 @@ async def stream_stats(
                 err_json = json.dumps({"error": "Failed to build stream payload"}, ensure_ascii=False)
                 yield f"event: error\ndata: {err_json}\n\n"
 
+            if (time.monotonic() - started_at) >= MAX_STREAM_DURATION_SEC:
+                break
             await asyncio.sleep(STREAM_INTERVAL_SEC)
 
     return StreamingResponse(
