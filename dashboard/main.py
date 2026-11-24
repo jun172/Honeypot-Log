@@ -16,7 +16,7 @@ from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google.cloud import bigquery as gcp_bigquery
 from google.cloud import logging as gcp_logging
@@ -128,8 +128,9 @@ def _env_bool(name: str, default: bool) -> bool:
 # ==========================================
 # 安全上限・キャッシュ・ML設定
 # ==========================================
-MAX_ALLOWED_LIMIT = _env_int("MAX_ALLOWED_LIMIT", 500, min_val=1, max_val=2000)
-MAX_QUERY_HOURS = _env_int("MAX_QUERY_HOURS", 24, min_val=1, max_val=168)
+SHOW_ALL_HISTORY = _env_bool("SHOW_ALL_HISTORY", True)
+MAX_ALLOWED_LIMIT = _env_int("MAX_ALLOWED_LIMIT", 10000, min_val=1, max_val=50000)
+MAX_QUERY_HOURS = _env_int("MAX_QUERY_HOURS", 8760, min_val=1, max_val=87600)
 MAX_STREAM_DURATION_SEC = _env_float("MAX_STREAM_DURATION_SEC", 45.0, min_val=5.0)
 MAX_LOG_CACHE_ENTRIES = _env_int("MAX_LOG_CACHE_ENTRIES", 128, min_val=1, max_val=2048)
 MAX_GEO_CACHE_ENTRIES = _env_int("MAX_GEO_CACHE_ENTRIES", 10000, min_val=1, max_val=100000)
@@ -140,9 +141,9 @@ MIN_STREAM_INTERVAL_SEC = 1.0
 UNSUPERVISED_CLUSTERS = _env_int("UNSUPERVISED_CLUSTERS", 0)
 MAX_UNSUPERVISED_CLUSTERS = _env_int("MAX_UNSUPERVISED_CLUSTERS", 8, min_val=2, max_val=20)
 
-# Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: true）
+# Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: 80%以上を表示）
 HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", True)
-ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 60, min_val=0, max_val=100)
+ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 80, min_val=0, max_val=100)
 
 # 監査ログ・運用者操作の除外設定（既定: 除外する）
 EXCLUDE_AUDIT_AND_ADMIN_LOGS = _env_bool("EXCLUDE_AUDIT_AND_ADMIN_LOGS", True)
@@ -189,7 +190,7 @@ ENABLE_BIGQUERY_LOGS = _env_bool("ENABLE_BIGQUERY_LOGS", False)
 LOG_SOURCE_MODE = (os.getenv("LOG_SOURCE_MODE") or "all").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
-MAX_GCS_BLOBS = _env_int("MAX_GCS_BLOBS", 500, min_val=1, max_val=5000)
+MAX_GCS_BLOBS = _env_int("MAX_GCS_BLOBS", 5000, min_val=1, max_val=50000)
 MAX_TIMELINE_EVENTS = _env_int(
     "MAX_TIMELINE_EVENTS", MAX_ALLOWED_LIMIT, min_val=1, max_val=MAX_ALLOWED_LIMIT
 )
@@ -316,6 +317,10 @@ SYSTEM_NOISE_PATTERNS = (
 )
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _is_unbounded_history(hours: int) -> bool:
+    return bool(SHOW_ALL_HISTORY and int(hours) >= 8760)
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -1516,7 +1521,7 @@ def _build_record_from_dict_and_meta(
 def _obj_to_record(
     obj: Any,
     blob_updated: datetime,
-    cutoff_dt: datetime,
+    cutoff_dt: datetime | None,
     source_name: str = "gcs",
 ) -> dict[str, Any] | None:
     if isinstance(obj, dict):
@@ -1537,7 +1542,7 @@ def _obj_to_record(
             or target_dict.get("time")
         )
         ts_dt = _parse_timestamp_str(ts_raw, blob_updated)
-        if ts_dt < cutoff_dt:
+        if cutoff_dt is not None and ts_dt < cutoff_dt:
             return None
 
         envelope_meta: dict[str, Any] = {}
@@ -1555,7 +1560,7 @@ def _obj_to_record(
             envelope_dict=envelope_meta or (obj if target_dict is not obj else None),
         )
 
-    if isinstance(obj, str) and obj.strip() and blob_updated >= cutoff_dt:
+    if isinstance(obj, str) and obj.strip() and (cutoff_dt is None or blob_updated >= cutoff_dt):
         line = sanitize_display_text(obj.strip())
         src_ip = _extract_first_ipv4(line) or "private"
         if _should_skip_record(src_ip, "text", "", "/", line):
@@ -1582,9 +1587,9 @@ def _obj_to_record(
     return None
 
 
-def _entry_to_record(entry: Any, cutoff_dt: datetime, source_name: str = "logging") -> dict[str, Any] | None:
+def _entry_to_record(entry: Any, cutoff_dt: datetime | None, source_name: str = "logging") -> dict[str, Any] | None:
     ts_dt = _parse_timestamp_str(getattr(entry, "timestamp", None), datetime.now(timezone.utc))
-    if ts_dt < cutoff_dt:
+    if cutoff_dt is not None and ts_dt < cutoff_dt:
         return None
 
     payload_raw = getattr(entry, "payload", None)
@@ -1629,7 +1634,7 @@ def _entry_to_record(entry: Any, cutoff_dt: datetime, source_name: str = "loggin
 def _parse_blob_text_to_records(
     content: str,
     blob_updated: datetime,
-    cutoff_dt: datetime,
+    cutoff_dt: datetime | None,
     max_records: int,
     source_name: str = "gcs",
 ) -> list[dict[str, Any]]:
@@ -1669,19 +1674,19 @@ def _parse_blob_text_to_records(
     return out
 
 
-def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
+def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime | None, limit: int) -> list[dict[str, Any]]:
     if limit <= 0 or not LOG_PROJECTS:
         return []
 
-    cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    time_filter = f'timestamp >= "{cutoff_iso}"'
-    audit_exclusion = (
-        ' AND logName !~ "cloudaudit.googleapis.com"'
-        if EXCLUDE_AUDIT_AND_ADMIN_LOGS
-        else ""
-    )
-    base_filter = f"{time_filter}{audit_exclusion}"
-    full_filter = f"{base_filter} AND ({LOG_FILTER})" if LOG_FILTER else base_filter
+    clauses: list[str] = []
+    if cutoff_dt is not None:
+        cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        clauses.append(f'timestamp >= "{cutoff_iso}"')
+    if EXCLUDE_AUDIT_AND_ADMIN_LOGS:
+        clauses.append('logName !~ "cloudaudit.googleapis.com"')
+    if LOG_FILTER:
+        clauses.append(f"({LOG_FILTER})")
+    full_filter = " AND ".join(clauses)
 
     records: list[dict[str, Any]] = []
     per_project_limit = max(1, (limit + len(LOG_PROJECTS) - 1) // len(LOG_PROJECTS))
@@ -1693,7 +1698,7 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
         try:
             logging_client = gcp_logging.Client(project=project_id)
             entries = logging_client.list_entries(
-                filter_=full_filter,
+                filter_=full_filter or None,
                 order_by=gcp_logging.DESCENDING,
                 page_size=page_size,
             )
@@ -1711,7 +1716,7 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
     return records[:limit]
 
 
-def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
+def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime | None, limit: int) -> list[dict[str, Any]]:
     if limit <= 0 or not LOG_GCS_BUCKETS:
         return []
 
@@ -1723,7 +1728,7 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
 
     records: list[dict[str, Any]] = []
     per_bucket_limit = max(1, (limit + len(LOG_GCS_BUCKETS) - 1) // len(LOG_GCS_BUCKETS))
-    min_blob_time = cutoff_dt - timedelta(days=1)
+    min_blob_time = (cutoff_dt - timedelta(days=1)) if cutoff_dt is not None else None
 
     for bucket_name in LOG_GCS_BUCKETS:
         if len(records) >= limit:
@@ -1735,7 +1740,10 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
             logger.warning("Failed to list GCS blobs in target %s: %s", bucket_name, exc)
             continue
 
-        candidate_blobs = [b for b in blobs if (b.updated is None or b.updated >= min_blob_time)]
+        if min_blob_time is not None:
+            candidate_blobs = [b for b in blobs if (b.updated is None or b.updated >= min_blob_time)]
+        else:
+            candidate_blobs = list(blobs)
         candidate_blobs.sort(
             key=lambda b: b.updated or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
@@ -1771,21 +1779,23 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
     return records[:limit]
 
 
-def _fetch_bigquery_entries_sync(cutoff_dt: datetime, limit: int) -> list[dict[str, Any]]:
+def _fetch_bigquery_entries_sync(cutoff_dt: datetime | None, limit: int) -> list[dict[str, Any]]:
     if not ENABLE_BIGQUERY_LOGS or limit <= 0 or not BQ_TABLE_ID:
         return []
 
-    cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    where_clause = ""
+    if cutoff_dt is not None:
+        cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        where_clause = f"\nWHERE\n  timestamp >= TIMESTAMP('{cutoff_iso}')"
+
     query = f"""
 SELECT
   timestamp,
   jsonPayload,
   textPayload
 FROM
-  `{BQ_TABLE_ID}`
-WHERE
-  timestamp >= TIMESTAMP('{cutoff_iso}')
+  `{BQ_TABLE_ID}`{where_clause}
 ORDER BY
   timestamp DESC
 LIMIT {safe_limit}
@@ -1796,7 +1806,7 @@ LIMIT {safe_limit}
         bq_client = gcp_bigquery.Client(project=BQ_PROJECT_ID)
         for row in bq_client.query(query).result():
             ts_dt = _parse_timestamp_str(getattr(row, "timestamp", None), datetime.now(timezone.utc))
-            if ts_dt < cutoff_dt:
+            if cutoff_dt is not None and ts_dt < cutoff_dt:
                 continue
 
             jp = _parse_json_dict(getattr(row, "jsonPayload", None))
@@ -1847,7 +1857,7 @@ def _record_dedup_key(rec: dict[str, Any]) -> str:
 def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     now_dt = datetime.now(timezone.utc)
-    cutoff_dt = now_dt - timedelta(hours=hours)
+    cutoff_dt = None if _is_unbounded_history(hours) else (now_dt - timedelta(hours=hours))
     combined: list[dict[str, Any]] = []
 
     if LOG_SOURCE_MODE in {"all", "both", "logging"}:
@@ -1899,10 +1909,97 @@ def calculate_gcp_costs(log_count: int, total_bytes: int, hours: int) -> dict[st
     }
 
 
+def _compute_right_side_analytics(
+    timeline_events: list[dict[str, Any]],
+    category_counts: dict[str, int],
+    cluster_summary: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """ダッシュボード右側の分析パネル用（カテゴリ・クラスタ・手口/パス・80%以上・時間帯別推移）を集計する。"""
+    total_events = len(timeline_events)
+    above_80_events = [ev for ev in timeline_events if _safe_int(ev.get("anomaly_score"), 0) >= 80]
+
+    category_breakdown: list[dict[str, Any]] = []
+    for cat, cnt in sorted(category_counts.items(), key=lambda x: x[1], reverse=True):
+        share = round((cnt / total_events) * 100.0, 1) if total_events > 0 else 0.0
+        category_breakdown.append({"category": cat, "count": cnt, "share_pct": share})
+
+    tactic_counter: Counter[str] = Counter()
+    path_counter: Counter[str] = Counter()
+    hour_counter: Counter[str] = Counter()
+
+    for ev in timeline_events:
+        raw_blob = f"{ev.get('path') or ''} {ev.get('payload') or ''}".lower()
+        method = str(ev.get("method") or "GET").upper()
+        clean_path = str(ev.get("path") or "/").split("?")[0]
+        path_counter[f"{method} {clean_path[:60]}"] += 1
+
+        if "next-action" in raw_blob:
+            tactic_counter["Next-Action RCE Probe"] += 1
+        elif "formsyscmd" in raw_blob or "/boaform/" in raw_blob:
+            tactic_counter["Boaform / Router RCE"] += 1
+        elif any(tok in raw_blob for tok in ("/bin/sh", "/bin/bash", "|sh", "| sh", "nc ", "child_process", "spawn(")):
+            tactic_counter["Shell / Command Exec"] += 1
+        else:
+            tactic_counter[str(ev.get("category") or "Other Anomaly")] += 1
+
+        ts_str = str(ev.get("timestamp") or "")
+        if len(ts_str) >= 13:
+            hour_counter[ts_str[:13].replace("T", " ") + ":00"] += 1
+
+    hourly_trend = [
+        {"hour": h, "count": c}
+        for h, c in sorted(hour_counter.items(), key=lambda x: x[0])[-12:]
+    ]
+
+    top_tactics = [
+        {
+            "tactic": name,
+            "count": cnt,
+            "share_pct": round((cnt / total_events) * 100.0, 1) if total_events > 0 else 0.0,
+        }
+        for name, cnt in tactic_counter.most_common(6)
+    ]
+
+    top_paths = [
+        {"endpoint": ep, "count": cnt}
+        for ep, cnt in path_counter.most_common(6)
+    ]
+
+    high_80_items = [
+        {
+            "id": ev.get("id"),
+            "timestamp": ev.get("timestamp"),
+            "ip": ev.get("ip"),
+            "flag": ev.get("flag"),
+            "country": ev.get("country"),
+            "category": ev.get("category"),
+            "anomaly_score": ev.get("anomaly_score"),
+            "cluster_label": ev.get("cluster_label"),
+            "attack_summary": ev.get("attack_summary"),
+            "method": ev.get("method"),
+            "path": ev.get("path"),
+        }
+        for ev in above_80_events[:25]
+    ]
+
+    return {
+        "anomaly_min_threshold": ANOMALY_SCORE_THRESHOLD,
+        "above_80_count": len(above_80_events),
+        "above_80_share_pct": round((len(above_80_events) / total_events) * 100.0, 1) if total_events > 0 else 0.0,
+        "above_80_events": high_80_items,
+        "category_breakdown": category_breakdown,
+        "cluster_breakdown": cluster_summary,
+        "top_tactics": top_tactics,
+        "top_paths": top_paths,
+        "hourly_trend": hourly_trend,
+    }
+
+
 async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     effective_hours = min(max(int(hours), 1), MAX_QUERY_HOURS)
     effective_limit = min(max(int(limit), 1), MAX_ALLOWED_LIMIT)
     cache_key = (
+        SHOW_ALL_HISTORY,
         effective_hours,
         effective_limit,
         tuple(LOG_PROJECTS),
@@ -1912,6 +2009,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         LOG_SOURCE_MODE,
         LOG_FILTER,
         LOG_GCS_PREFIX,
+        MAX_GCS_BLOBS,
         SHOW_ALL_JSON,
         MAX_DISPLAY_TEXT_LEN,
         SKIP_JAPAN_IPS,
@@ -2100,11 +2198,20 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 }
             )
 
+    right_analytics = _compute_right_side_analytics(
+        timeline_events=timeline_events,
+        category_counts=category_counts,
+        cluster_summary=cluster_summary,
+    )
+
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "is_demo_mode": is_demo_mode,
         "show_all_json": SHOW_ALL_JSON,
+        "show_all_history": SHOW_ALL_HISTORY,
+        "unbounded_history": _is_unbounded_history(effective_hours),
         "only_anomalous": True,
+        "anomaly_min_threshold": ANOMALY_SCORE_THRESHOLD,
         "hide_automated_recon": HIDE_AUTOMATED_RECON,
         "exclude_audit_and_admin_logs": EXCLUDE_AUDIT_AND_ADMIN_LOGS,
         "display_mode": "flag_and_country_only",
@@ -2113,11 +2220,13 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             "unique_ips": len(ip_counts),
             "unique_countries": len(country_counts),
             "high_anomaly_count": high_anomaly_count,
+            "above_80_count": right_analytics["above_80_count"],
             "unsupervised_clusters": len(cluster_summary),
         },
         "categories": category_counts,
         "clusters": cluster_counts,
         "cluster_summary": cluster_summary,
+        "right_analytics": right_analytics,
         "top_countries": sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "top_ips": sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "timeline": timeline_events,
@@ -2223,8 +2332,8 @@ async def favicon() -> Response:
 
 @app.get("/api/chart/categories.png")
 async def get_category_chart_png(
-    hours: int = Query(default=6, ge=1, le=168),
-    limit: int = Query(default=500, ge=1, le=2000),
+    hours: int = Query(default=8760, ge=1, le=87600),
+    limit: int = Query(default=10000, ge=1, le=50000),
 ) -> Response:
     safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
@@ -2243,8 +2352,8 @@ async def get_category_chart_png(
 
 @app.get("/api/stats")
 async def get_stats(
-    hours: int = Query(default=6, ge=1, le=168),
-    limit: int = Query(default=500, ge=1, le=2000),
+    hours: int = Query(default=8760, ge=1, le=87600),
+    limit: int = Query(default=10000, ge=1, le=50000),
 ) -> dict[str, Any]:
     safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
@@ -2254,8 +2363,8 @@ async def get_stats(
 @app.get("/api/stream")
 async def stream_stats(
     request: Request,
-    hours: int = Query(default=6, ge=1, le=168),
-    limit: int = Query(default=500, ge=1, le=2000),
+    hours: int = Query(default=8760, ge=1, le=87600),
+    limit: int = Query(default=10000, ge=1, le=50000),
 ) -> StreamingResponse:
     safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
@@ -2296,3 +2405,4 @@ async def stream_stats(
 @app.get("/environment.html")
 async def serve_environment() -> FileResponse:
     return FileResponse(_resolve_static_file("environment.html"))
+
