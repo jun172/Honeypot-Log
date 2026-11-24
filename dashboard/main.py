@@ -36,14 +36,17 @@ from sklearn.preprocessing import StandardScaler
 
 
 def _load_dotenv_if_present() -> None:
-    """カレントまたは main.py と同じフォルダの .env を読み込む（既存環境変数を優先）。"""
+    """カレントまたはこのファイルと同じフォルダの .env を読み込む（既存環境変数を優先）。"""
     candidates = [
         Path(__file__).resolve().parent / ".env",
         Path.cwd() / ".env",
     ]
     seen_paths: set[Path] = set()
     for env_path in candidates:
-        resolved = env_path.resolve()
+        try:
+            resolved = env_path.resolve()
+        except OSError:
+            continue
         if resolved in seen_paths or not resolved.is_file():
             continue
         seen_paths.add(resolved)
@@ -85,29 +88,62 @@ def _load_dotenv_if_present() -> None:
 
 _load_dotenv_if_present()
 
+std_logging.basicConfig(level=std_logging.INFO)
 logger = std_logging.getLogger("honeypot-dashboard")
+
+
+def _env_int(name: str, default: int, min_val: int | None = None, max_val: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        val = int(raw) if raw else default
+    except ValueError:
+        val = default
+    if min_val is not None:
+        val = max(min_val, val)
+    if max_val is not None:
+        val = min(max_val, val)
+    return val
+
+
+def _env_float(name: str, default: float, min_val: float | None = None) -> float:
+    raw = os.getenv(name, "").strip()
+    try:
+        val = float(raw) if raw else default
+        if not math.isfinite(val):
+            val = default
+    except ValueError:
+        val = default
+    if min_val is not None:
+        val = max(min_val, val)
+    return val
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 # ==========================================
 # 安全上限・キャッシュ・ML設定
 # ==========================================
-MAX_ALLOWED_LIMIT = int(os.getenv("MAX_ALLOWED_LIMIT", "50000"))
-MAX_LOG_CACHE_ENTRIES = int(os.getenv("MAX_LOG_CACHE_ENTRIES", "128"))
-MAX_GEO_CACHE_ENTRIES = int(os.getenv("MAX_GEO_CACHE_ENTRIES", "10000"))
-MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(50 * 1024 * 1024)))
+MAX_ALLOWED_LIMIT = _env_int("MAX_ALLOWED_LIMIT", 50000, min_val=1, max_val=50000)
+MAX_LOG_CACHE_ENTRIES = _env_int("MAX_LOG_CACHE_ENTRIES", 128, min_val=1, max_val=2048)
+MAX_GEO_CACHE_ENTRIES = _env_int("MAX_GEO_CACHE_ENTRIES", 10000, min_val=1, max_val=100000)
+MAX_GCS_BLOB_BYTES = _env_int("MAX_GCS_BLOB_BYTES", 50 * 1024 * 1024, min_val=1024)
 MIN_STREAM_INTERVAL_SEC = 1.0
 
 # 教師なしクラスタリング設定（0以下でサンプル数から自動決定）
-UNSUPERVISED_CLUSTERS = int(os.getenv("UNSUPERVISED_CLUSTERS", "0"))
-MAX_UNSUPERVISED_CLUSTERS = int(os.getenv("MAX_UNSUPERVISED_CLUSTERS", "8"))
+UNSUPERVISED_CLUSTERS = _env_int("UNSUPERVISED_CLUSTERS", 0)
+MAX_UNSUPERVISED_CLUSTERS = _env_int("MAX_UNSUPERVISED_CLUSTERS", 8, min_val=2, max_val=20)
 
 # Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: true）
-HIDE_AUTOMATED_RECON = os.getenv("HIDE_AUTOMATED_RECON", "true").lower() == "true"
-ANOMALY_SCORE_THRESHOLD = min(max(int(os.getenv("ANOMALY_SCORE_THRESHOLD", "60")), 0), 100)
+HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", True)
+ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 60, min_val=0, max_val=100)
 
 # 監査ログ・運用者操作の除外設定（既定: 除外する）
-EXCLUDE_AUDIT_AND_ADMIN_LOGS = (
-    os.getenv("EXCLUDE_AUDIT_AND_ADMIN_LOGS", "true").lower() == "true"
-)
+EXCLUDE_AUDIT_AND_ADMIN_LOGS = _env_bool("EXCLUDE_AUDIT_AND_ADMIN_LOGS", True)
 _RAW_ADMIN_IPS = os.getenv("ADMIN_IPS", "59.146.155.164").strip()
 ADMIN_IPS: set[str] = (
     {x.strip() for x in _RAW_ADMIN_IPS.split(",") if x.strip()}
@@ -124,8 +160,8 @@ ADMIN_EMAILS: set[str] = (
 # ==========================================
 # 設定・定数（Cloud Logging + GCS + BigQuery 統合）
 # ==========================================
-GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "honeypot-515503")
-LOG_SOURCE_PROJECT_ID = os.getenv("LOG_SOURCE_PROJECT_ID", GCP_PROJECT_ID)
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "honeypot-515503").strip() or "honeypot-515503"
+LOG_SOURCE_PROJECT_ID = (os.getenv("LOG_SOURCE_PROJECT_ID") or GCP_PROJECT_ID).strip()
 
 _RAW_LOG_PROJECTS = os.getenv("LOG_PROJECTS") or LOG_SOURCE_PROJECT_ID
 LOG_PROJECTS: list[str] = [
@@ -141,29 +177,27 @@ LOG_GCS_BUCKETS: list[str] = [
     item.strip() for item in _RAW_GCS_BUCKETS.split(",") if item.strip()
 ]
 
-BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "honeypot-logs")
-BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "honeypot_dataset")
-BQ_TABLE_NAME = os.getenv("BQ_TABLE_NAME", "run_googleapis_com_stdout")
+BQ_PROJECT_ID = (os.getenv("BQ_PROJECT_ID") or GCP_PROJECT_ID).strip()
+BQ_DATASET_ID = (os.getenv("BQ_DATASET_ID") or "honeypot_dataset").strip()
+BQ_TABLE_NAME = (os.getenv("BQ_TABLE_NAME") or "run_googleapis_com_stdout").strip()
 BQ_TABLE_ID = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_NAME}"
-ENABLE_BIGQUERY_LOGS = os.getenv("ENABLE_BIGQUERY_LOGS", "true").lower() == "true"
+# 403権限エラー防止のため既定は false（必要な場合のみ ENABLE_BIGQUERY_LOGS=true で有効化）
+ENABLE_BIGQUERY_LOGS = _env_bool("ENABLE_BIGQUERY_LOGS", False)
 
-LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "all").strip().lower()
+LOG_SOURCE_MODE = (os.getenv("LOG_SOURCE_MODE") or "all").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
-MAX_GCS_BLOBS = min(max(int(os.getenv("MAX_GCS_BLOBS", "500")), 1), 5000)
-MAX_TIMELINE_EVENTS = min(
-    max(int(os.getenv("MAX_TIMELINE_EVENTS", str(MAX_ALLOWED_LIMIT))), 1),
-    MAX_ALLOWED_LIMIT,
+MAX_GCS_BLOBS = _env_int("MAX_GCS_BLOBS", 500, min_val=1, max_val=5000)
+MAX_TIMELINE_EVENTS = _env_int(
+    "MAX_TIMELINE_EVENTS", MAX_ALLOWED_LIMIT, min_val=1, max_val=MAX_ALLOWED_LIMIT
 )
 
-USD_TO_JPY = float(os.getenv("USD_TO_JPY", "152.0"))
-STREAM_INTERVAL_SEC = max(
-    float(os.getenv("STREAM_INTERVAL_SEC", "3.0")), MIN_STREAM_INTERVAL_SEC
-)
-LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "5.0")), 1.0)
+USD_TO_JPY = _env_float("USD_TO_JPY", 152.0, min_val=1.0)
+STREAM_INTERVAL_SEC = _env_float("STREAM_INTERVAL_SEC", 3.0, min_val=MIN_STREAM_INTERVAL_SEC)
+LOG_CACHE_TTL = _env_float("LOG_CACHE_TTL", 5.0, min_val=1.0)
 
-SHOW_ALL_JSON = os.getenv("SHOW_ALL_JSON", "true").lower() == "true"
-MAX_DISPLAY_TEXT_LEN = int(os.getenv("MAX_DISPLAY_TEXT_LEN", "4000"))
+SHOW_ALL_JSON = _env_bool("SHOW_ALL_JSON", True)
+MAX_DISPLAY_TEXT_LEN = _env_int("MAX_DISPLAY_TEXT_LEN", 4000, min_val=100, max_val=20000)
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
 ALLOWED_ORIGINS: list[str] = (
@@ -177,12 +211,12 @@ LOG_RESPONSE_CACHE: OrderedDict[
     tuple[float, dict[str, Any]],
 ] = OrderedDict()
 
-_default_skip = "false" if SHOW_ALL_JSON else "true"
-SKIP_CRAWLERS = os.getenv("SKIP_CRAWLERS", _default_skip).lower() == "true"
-SKIP_GOOGLE_LLC = os.getenv("SKIP_GOOGLE_LLC", _default_skip).lower() == "true"
-SKIP_PRIVATE_IPS = os.getenv("SKIP_PRIVATE_IPS", _default_skip).lower() == "true"
-SKIP_SYSTEM_NOISE = os.getenv("SKIP_SYSTEM_NOISE", _default_skip).lower() == "true"
-SKIP_JAPAN_IPS = os.getenv("SKIP_JAPAN_IPS", _default_skip).lower() == "true"
+_default_skip = not SHOW_ALL_JSON
+SKIP_CRAWLERS = _env_bool("SKIP_CRAWLERS", _default_skip)
+SKIP_GOOGLE_LLC = _env_bool("SKIP_GOOGLE_LLC", _default_skip)
+SKIP_PRIVATE_IPS = _env_bool("SKIP_PRIVATE_IPS", _default_skip)
+SKIP_SYSTEM_NOISE = _env_bool("SKIP_SYSTEM_NOISE", _default_skip)
+SKIP_JAPAN_IPS = _env_bool("SKIP_JAPAN_IPS", _default_skip)
 
 _RAW_IGNORED_IPS = os.getenv("IGNORED_IPS", "").strip()
 IGNORED_IPS: set[str] = (
@@ -195,8 +229,8 @@ IGNORED_PREFIXES: tuple[str, ...] = tuple(
 )
 
 GEO_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
-GEO_SUCCESS_TTL = float(os.getenv("GEO_SUCCESS_TTL", str(60 * 60 * 24)))
-GEO_ERROR_TTL = float(os.getenv("GEO_ERROR_TTL", "20.0"))
+GEO_SUCCESS_TTL = _env_float("GEO_SUCCESS_TTL", 60.0 * 60.0 * 24.0, min_val=1.0)
+GEO_ERROR_TTL = _env_float("GEO_ERROR_TTL", 20.0, min_val=1.0)
 
 COUNTRY_JA_MAP: dict[str, str] = {
     "US": "アメリカ",
@@ -280,7 +314,6 @@ SYSTEM_NOISE_PATTERNS = (
 )
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-_FORMULA_PREFIX_RE = re.compile(r"^[=+\-@\t\r]")
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -796,8 +829,10 @@ def run_unsupervised_clustering(
     )
     try:
         sparse_mat = vectorizer.fit_transform(texts)
-        X_txt = np.asarray(sparse_mat.toarray(), dtype=np.float64) * 1.4  # type: ignore[union-attr,attr-defined]
-    except ValueError:
+        to_array_fn = getattr(sparse_mat, "toarray", None)
+        dense_arr = to_array_fn() if callable(to_array_fn) else sparse_mat
+        X_txt = np.asarray(dense_arr, dtype=np.float64) * 1.4
+    except (ValueError, AttributeError, TypeError):
         X_txt = np.zeros((n_samples, 1), dtype=np.float64)
 
     scaler = StandardScaler()
@@ -1678,7 +1713,12 @@ def _fetch_gcs_entries_sync(now_dt: datetime, cutoff_dt: datetime, limit: int) -
     if limit <= 0 or not LOG_GCS_BUCKETS:
         return []
 
-    storage_client = gcp_storage.Client(project=GCP_PROJECT_ID)
+    try:
+        storage_client = gcp_storage.Client(project=GCP_PROJECT_ID)
+    except Exception as exc:
+        logger.warning("Failed to initialize GCS client: %s", exc)
+        return []
+
     records: list[dict[str, Any]] = []
     per_bucket_limit = max(1, (limit + len(LOG_GCS_BUCKETS) - 1) // len(LOG_GCS_BUCKETS))
     min_blob_time = cutoff_dt - timedelta(days=1)
@@ -1812,7 +1852,7 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
         combined.extend(_fetch_cloud_logging_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
     if LOG_SOURCE_MODE in {"all", "both", "gcs"}:
         combined.extend(_fetch_gcs_entries_sync(now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit))
-    if LOG_SOURCE_MODE in {"all", "bigquery"}:
+    if ENABLE_BIGQUERY_LOGS and LOG_SOURCE_MODE in {"all", "bigquery"}:
         combined.extend(_fetch_bigquery_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
 
     deduped: dict[str, dict[str, Any]] = {}
@@ -2091,7 +2131,10 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_ml_models()
+    try:
+        init_ml_models()
+    except Exception as exc:
+        logger.exception("ML model initialization failed during startup: %s", exc)
     yield
 
 
@@ -2163,6 +2206,11 @@ async def serve_index() -> FileResponse:
     if STATIC_ROOT.is_dir() and index_path.is_file():
         return FileResponse(_resolve_static_file("index.html"))
     raise HTTPException(status_code=404, detail="index.html not found")
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/api/chart/categories.png")
