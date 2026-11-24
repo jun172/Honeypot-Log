@@ -3,6 +3,7 @@ from collections import Counter, OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 import logging as std_logging
 import math
@@ -15,12 +16,16 @@ from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google.cloud import bigquery as gcp_bigquery
 from google.cloud import logging as gcp_logging
 from google.cloud import storage as gcp_storage
 import httpx
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.ensemble import IsolationForest
@@ -307,13 +312,6 @@ def sanitize_display_text(text: Any, max_len: int | None = None) -> str:
     return s
 
 
-def sanitize_spreadsheet_cell(value: Any, max_len: int | None = None) -> str:
-    text = sanitize_display_text(value, max_len=max_len)
-    if _FORMULA_PREFIX_RE.match(text):
-        return "'" + text
-    return text
-
-
 def _safe_json_dumps(obj: Any, indent: int | None = None) -> str:
     raw = json.dumps(obj, ensure_ascii=False, default=str, indent=indent)
     return _CONTROL_CHAR_RE.sub("", raw)
@@ -401,6 +399,76 @@ def _is_audit_or_admin_log(src_ip: str, raw_text: str, user_agent: str = "") -> 
         return True
 
     return False
+
+
+# ==========================================
+# matplotlib（plt）グラフ描画
+# ==========================================
+def render_category_chart_png(categories: dict[str, int], title: str = "ML Attack Category Distribution") -> bytes:
+    """カテゴリ集計辞書から matplotlib（plt）で棒グラフPNGを生成する。"""
+    items = sorted(
+        ((str(k), _safe_int(v, 0)) for k, v in (categories or {}).items() if _safe_int(v, 0) > 0),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 4.2), dpi=130)
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#1e293b")
+
+    if not items:
+        ax.text(
+            0.5,
+            0.5,
+            "No anomalous category data",
+            color="#94a3b8",
+            ha="center",
+            va="center",
+            fontsize=12,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+    else:
+        labels = [k for k, _ in items]
+        counts = [v for _, v in items]
+        y_pos = np.arange(len(labels))
+        colors = ["#38bdf8", "#f97316", "#a855f7", "#22c55e", "#eab308"][: len(labels)]
+        if len(colors) < len(labels):
+            colors.extend(["#64748b"] * (len(labels) - len(colors)))
+
+        bars = ax.barh(y_pos, counts, color=colors, height=0.58)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels, color="#e2e8f0", fontsize=9.5)
+        ax.invert_yaxis()
+        ax.set_xlabel("Count", color="#cbd5e1", fontsize=9.5)
+        ax.tick_params(axis="x", colors="#cbd5e1", labelsize=9)
+        ax.grid(axis="x", linestyle="--", alpha=0.25, color="#94a3b8")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#475569")
+        ax.spines["bottom"].set_color("#475569")
+
+        max_c = max(counts)
+        for bar, cnt in zip(bars, counts):
+            ax.text(
+                bar.get_width() + max(max_c * 0.02, 0.3),
+                bar.get_y() + bar.get_height() / 2,
+                str(cnt),
+                va="center",
+                ha="left",
+                color="#f8fafc",
+                fontsize=9.5,
+                fontweight="bold",
+            )
+
+    ax.set_title(title, color="#f8fafc", fontsize=11, fontweight="bold", pad=10)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ==========================================
@@ -800,8 +868,25 @@ def classify_and_score(
     confidence = round(float(probs[best_idx]) * 100.0, 1)
 
     lower_sig = signal_text.lower()
+    ua_lower = (user_agent or "").lower()
+    path_lower = (path or "").lower()
+    method_upper = (method or "GET").upper()
+
     is_tls_hello = "\x16\x03" in raw_request_line or "\\u0016\\u0003" in raw_request_line
-    is_scanner_ua = any(tok in user_agent.lower() for tok in ("zgrab", "masscan", "nuclei", "xpanse"))
+    is_scanner_ua = any(
+        tok in ua_lower
+        for tok in (
+            "zgrab",
+            "masscan",
+            "nuclei",
+            "xpanse",
+            "internetmeasurement",
+            "censysinspect",
+            "shodan",
+            "python-requests",
+            "go-http-client",
+        )
+    )
 
     has_rce_signal = any(
         k in lower_sig
@@ -830,6 +915,22 @@ def classify_and_score(
             "benchmark(",
             "waitfor delay",
             "information_schema",
+            "<script",
+            "../",
+        )
+    )
+    has_cred_probe_signal = any(
+        k in path_lower
+        for k in (
+            ".env",
+            ".git",
+            "config.json",
+            "credentials",
+            "id_rsa",
+            "backup",
+            ".sql",
+            "actuator",
+            "secrets",
         )
     )
 
@@ -839,13 +940,15 @@ def classify_and_score(
     elif has_sqli_signal:
         category = "SQLi / XSS Probe"
         confidence = max(confidence, 82.0)
-    elif any(k in lower_sig for k in (".env", ".git", "credentials", "id_rsa", "actuator")):
-        if category == "Automated Recon / Scanner":
-            category = "Credential / Env Theft"
-            confidence = max(confidence, 82.0)
+    elif has_cred_probe_signal:
+        category = "Credential / Env Theft"
+        confidence = max(confidence, 84.0)
     elif is_tls_hello or is_scanner_ua or event_type == "bad_request" or "mgldd" in lower_sig:
         category = "Automated Recon / Scanner"
-        confidence = max(confidence, 75.0)
+        confidence = max(confidence, 78.0)
+    elif method_upper == "GET" and path_lower in {"", "/", "/robots.txt", "/favicon.ico", "/sitemap.xml"}:
+        category = "Automated Recon / Scanner"
+        confidence = max(confidence, 72.0)
 
     special_chars = len(re.findall(r"['\";|<>$`\\{}\[\]\.\./]", f"{path} {payload} {raw_request_line}"[:4096]))
     features = np.array(
@@ -857,21 +960,18 @@ def classify_and_score(
 
     if category == "RCE / Command Injection":
         anomaly_pct = max(anomaly_pct, 82)
-    elif category == "SQLi / XSS Probe" or category == "Credential / Env Theft":
-        anomaly_pct = max(anomaly_pct, 68)
+    elif category in {"SQLi / XSS Probe", "Credential / Env Theft"}:
+        anomaly_pct = max(anomaly_pct, 72)
     elif category == "Automated Recon / Scanner":
-        anomaly_pct = min(anomaly_pct, 55)
+        anomaly_pct = min(anomaly_pct, 45)
 
     return category, confidence, anomaly_pct
 
 
 def _is_anomalous_event(category: str, anomaly_score: int, event_type: str = "") -> bool:
-    """Automated Recon / Scanner を除外し、異常イベントのみを対象とする判定。"""
     cat_norm = (category or "").strip()
     if HIDE_AUTOMATED_RECON and cat_norm == "Automated Recon / Scanner":
         return False
-    if cat_norm in {"RCE / Command Injection", "SQLi / XSS Probe", "Credential / Env Theft"}:
-        return True
     return anomaly_score >= ANOMALY_SCORE_THRESHOLD
 
 
@@ -1963,156 +2063,6 @@ def _resolve_static_file(filename: str) -> Path:
     return candidate
 
 
-def _render_all_json_html(script_nonce: str) -> str:
-    safe_nonce = re.sub(r"[^A-Za-z0-9_-]", "", script_nonce)
-    return f"""<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>All JSON Logs Viewer (Anomalous Only)</title>
-  <style>
-    body {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }}
-    header {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; background: #1e293b; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }}
-    .controls {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
-    input, button, select {{ background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }}
-    button {{ cursor: pointer; background: #2563eb; border-color: #2563eb; }}
-    button:hover {{ background: #1d4ed8; }}
-    .meta {{ font-size: 12px; color: #94a3b8; }}
-    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }}
-    .card-head {{ display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; font-size: 12px; color: #93c5fd; margin-bottom: 8px; }}
-    pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; background: #020617; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #f1f5f9; max-height: 520px; overflow: auto; }}
-  </style>
-</head>
-<body>
-  <header>
-    <div>
-      <strong>All JSON Logs Viewer (Anomalous Only)</strong>
-      <div class="meta" id="status-bar">Connecting...</div>
-    </div>
-    <div class="controls">
-      <input id="filter-input" type="text" placeholder="キーワード検索 (IP, path, source, cluster, JSON...)" />
-      <select id="hours-select">
-        <option value="1">1h</option>
-        <option value="6">6h</option>
-        <option value="24" selected>24h</option>
-        <option value="72">72h</option>
-        <option value="168">7d</option>
-      </select>
-      <button id="refresh-btn" type="button">今すぐ更新</button>
-      <button id="toggle-stream-btn" type="button">ストリーム停止</button>
-    </div>
-  </header>
-  <main id="json-list"></main>
-  <script nonce="{safe_nonce}">
-    const listEl = document.getElementById("json-list");
-    const statusEl = document.getElementById("status-bar");
-    const filterEl = document.getElementById("filter-input");
-    const hoursEl = document.getElementById("hours-select");
-    const refreshBtn = document.getElementById("refresh-btn");
-    const toggleStreamBtn = document.getElementById("toggle-stream-btn");
-
-    let latestRecords = [];
-    let eventSource = null;
-    let streaming = true;
-
-    function renderRecords(records, updatedAt) {{
-      const q = (filterEl.value || "").trim().toLowerCase();
-      const filtered = q
-        ? records.filter((r) => {{
-            const hay = `${{r.timestamp || ""}} ${{r.source || ""}} ${{r.ip || ""}} ${{r.country || ""}} ${{r.category || ""}} ${{r.cluster_label || ""}} ${{r.json_pretty || ""}}`.toLowerCase();
-            return hay.includes(q);
-          }})
-        : records;
-
-      statusEl.textContent = `Updated: ${{updatedAt || "-"}} | Showing: ${{filtered.length}} / ${{records.length}} anomalous JSON records`;
-      listEl.innerHTML = "";
-
-      const frag = document.createDocumentFragment();
-      for (const rec of filtered) {{
-        const card = document.createElement("section");
-        card.className = "card";
-
-        const head = document.createElement("div");
-        head.className = "card-head";
-        head.textContent = `[${{rec.timestamp || ""}}] source=${{rec.source || ""}} | ip=${{rec.ip || ""}} (${{rec.country || ""}}) | cat=${{rec.category || ""}} | cluster=${{rec.cluster_label || ""}}`;
-
-        const pre = document.createElement("pre");
-        pre.textContent = rec.json_pretty || JSON.stringify(rec.json || {{}}, null, 2);
-
-        card.appendChild(head);
-        card.appendChild(pre);
-        frag.appendChild(card);
-      }}
-      listEl.appendChild(frag);
-    }}
-
-    async function fetchOnce() {{
-      const hours = encodeURIComponent(hoursEl.value || "24");
-      const resp = await fetch(`/api/json/all?hours=${{hours}}&limit=50000`);
-      if (!resp.ok) throw new Error(`HTTP ${{resp.status}}`);
-      const data = await resp.json();
-      latestRecords = Array.isArray(data.records) ? data.records : [];
-      renderRecords(latestRecords, data.updated_at);
-    }}
-
-    function connectStream() {{
-      if (eventSource) {{
-        eventSource.close();
-        eventSource = null;
-      }}
-      if (!streaming) return;
-      const hours = encodeURIComponent(hoursEl.value || "24");
-      eventSource = new EventSource(`/api/stream?hours=${{hours}}&limit=50000`);
-      eventSource.addEventListener("stats", (ev) => {{
-        try {{
-          const data = JSON.parse(ev.data);
-          latestRecords = Array.isArray(data.all_json_records)
-            ? data.all_json_records
-            : (data.timeline || []).map((t) => ({{
-                id: t.id,
-                timestamp: t.timestamp,
-                source: t.source,
-                ip: t.ip,
-                country: t.country,
-                category: t.category,
-                cluster_id: t.cluster_id,
-                cluster_label: t.cluster_label,
-                json: t.raw_json,
-                json_pretty: t.raw_json_pretty || t.payload || "",
-              }}));
-          renderRecords(latestRecords, data.updated_at);
-        }} catch (err) {{
-          console.error(err);
-        }}
-      }});
-      eventSource.onerror = () => {{
-        statusEl.textContent = "Stream reconnecting...";
-      }};
-    }}
-
-    filterEl.addEventListener("input", () => renderRecords(latestRecords, statusEl.textContent));
-    hoursEl.addEventListener("change", () => {{
-      fetchOnce().catch(console.error);
-      connectStream();
-    }});
-    refreshBtn.addEventListener("click", () => fetchOnce().catch(console.error));
-    toggleStreamBtn.addEventListener("click", () => {{
-      streaming = !streaming;
-      toggleStreamBtn.textContent = streaming ? "ストリーム停止" : "ストリーム再開";
-      if (streaming) connectStream();
-      else if (eventSource) eventSource.close();
-    }});
-
-    fetchOnce().catch((e) => {{
-      statusEl.textContent = `Fetch error: ${{e.message}}`;
-    }});
-    connectStream();
-  </script>
-</body>
-</html>"""
-
-
 @app.get("/")
 async def serve_index() -> FileResponse:
     index_path = STATIC_ROOT / "index.html"
@@ -2121,29 +2071,21 @@ async def serve_index() -> FileResponse:
     raise HTTPException(status_code=404, detail="index.html not found")
 
 
-@app.get("/json")
-@app.get("/all-json")
-async def serve_all_json_viewer(request: Request) -> StreamingResponse:
-    nonce = getattr(request.state, "csp_nonce", "")
-    html = _render_all_json_html(nonce)
-    return StreamingResponse(iter([html]), media_type="text/html; charset=utf-8")
-
-
-@app.get("/api/json/all")
-async def get_all_json(
+@app.get("/api/chart/categories.png")
+async def get_category_chart_png(
     hours: int = Query(default=24, ge=1, le=720),
     limit: int = Query(default=MAX_ALLOWED_LIMIT, ge=1, le=MAX_ALLOWED_LIMIT),
-) -> JSONResponse:
+) -> Response:
     payload = await build_stats_payload(hours=hours, limit=limit)
-    records = payload.get("all_json_records", [])
-    return JSONResponse(
-        content={
-            "updated_at": payload.get("updated_at"),
-            "count": len(records),
-            "clusters": payload.get("clusters", {}),
-            "cluster_summary": payload.get("cluster_summary", []),
-            "records": records,
-        }
+    png_bytes = await asyncio.to_thread(
+        render_category_chart_png,
+        payload.get("categories", {}),
+        f"ML Attack Category Distribution ({hours}h)",
+    )
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache"},
     )
 
 
