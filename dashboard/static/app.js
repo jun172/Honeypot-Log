@@ -10,6 +10,7 @@ let renderRafId = null;
 
 const EXCLUDE_GOOGLE_AND_PRIVATE = true;
 const MAX_SEEN_EVENT_IDS = 100000;
+const ALLOWED_HOURS = new Set([6, 24, 72, 168]);
 const ALLOWED_BADGE_CLASSES = new Set([
   "badge-danger",
   "badge-purple",
@@ -150,9 +151,21 @@ function t(key) {
   return I18N[currentLang]?.[key] ?? I18N.ja[key] ?? key;
 }
 
-function toSafeText(val, fallback = "") {
+function sanitizeText(val, fallback = "", maxLen = 1000) {
   if (val === null || val === undefined) return fallback;
-  return String(val);
+  const cleaned = String(val).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
+}
+
+function toSafeText(val, fallback = "") {
+  return sanitizeText(val, fallback, 1000);
+}
+
+function getValidatedHours() {
+  const hoursEl = document.getElementById("hours-select");
+  if (!hoursEl) return 24;
+  const parsed = Number(hoursEl.value);
+  return ALLOWED_HOURS.has(parsed) ? parsed : 24;
 }
 
 function createTextEl(tagName, text, className = "") {
@@ -165,7 +178,7 @@ function createTextEl(tagName, text, className = "") {
 }
 
 function isPublicIpv4Str(ip) {
-  const s = toSafeText(ip).trim();
+  const s = toSafeText(ip, "", 64).trim();
   if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(s)) return false;
   const octets = s.split(".").map(Number);
   if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return false;
@@ -180,7 +193,7 @@ function isGoogleOrPrivateEntry(entry) {
   if (!EXCLUDE_GOOGLE_AND_PRIVATE || !entry || typeof entry !== "object") {
     return false;
   }
-  const ip = toSafeText(entry.ip).trim().toLowerCase();
+  const ip = toSafeText(entry.ip, "", 64).trim().toLowerCase();
   if (!ip || ip === "private" || ip === "unknown" || !isPublicIpv4Str(ip)) {
     return true;
   }
@@ -280,10 +293,14 @@ function initMap() {
     worldCopyJump: true,
   });
 
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  const tileLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap contributors",
     maxZoom: 19,
-  }).addTo(mapInstance);
+  });
+  tileLayer.on("tileerror", () => {
+    // 外部タイル取得失敗時もダッシュボード全体を止めない
+  });
+  tileLayer.addTo(mapInstance);
 
   markerLayer = L.layerGroup().addTo(mapInstance);
 }
@@ -295,17 +312,17 @@ function buildPopupElement(pt) {
   container.style.lineHeight = "1.4";
 
   const titleEl = document.createElement("strong");
-  titleEl.textContent = `${toSafeText(pt.flag, "🌐")} ${toSafeText(pt.country, "Unknown")}`;
+  titleEl.textContent = `${toSafeText(pt.flag, "🌐", 16)} ${toSafeText(pt.country, "Unknown", 100)}`;
   container.appendChild(titleEl);
   container.appendChild(document.createElement("br"));
 
   const ipLabel = document.createTextNode(`${t("popup_ip")}: `);
-  const ipCode = createTextEl("code", toSafeText(pt.ip));
+  const ipCode = createTextEl("code", toSafeText(pt.ip, "", 64));
   container.appendChild(ipLabel);
   container.appendChild(ipCode);
   container.appendChild(document.createElement("br"));
 
-  const ispLine = document.createTextNode(`${t("popup_isp")}: ${toSafeText(pt.isp)}`);
+  const ispLine = document.createTextNode(`${t("popup_isp")}: ${toSafeText(pt.isp, "Unknown ISP", 150)}`);
   container.appendChild(ispLine);
   container.appendChild(document.createElement("br"));
 
@@ -322,7 +339,7 @@ function buildPopupElement(pt) {
   container.appendChild(document.createElement("br"));
 
   const tacticLine = document.createTextNode(
-    `${t("popup_tactic")}: ${toSafeText(pt.category)}`
+    `${t("popup_tactic")}: ${toSafeText(pt.category, "Unknown", 80)}`
   );
   container.appendChild(tacticLine);
 
@@ -335,7 +352,7 @@ function updateMarkers(points) {
 
   if (!Array.isArray(points)) return;
 
-  points.forEach((pt) => {
+  points.slice(0, 500).forEach((pt) => {
     if (!pt || typeof pt !== "object" || isGoogleOrPrivateEntry(pt)) return;
     const lat = Number(pt.lat);
     const lon = Number(pt.lon);
@@ -367,7 +384,7 @@ function updateCategoryChart(categories) {
   const safeCategories =
     categories && typeof categories === "object" ? categories : {};
   const ctx = canvas.getContext("2d");
-  const labels = Object.keys(safeCategories).map((k) => toSafeText(k));
+  const labels = Object.keys(safeCategories).map((k) => toSafeText(k, "Unknown", 80));
   const values = Object.values(safeCategories).map((v) => {
     const num = Number(v);
     return Number.isFinite(num) && num >= 0 ? num : 0;
@@ -437,7 +454,7 @@ function getFilteredTimeline(timeline) {
       ev.timestamp,
     ]
       .filter((v) => v !== null && v !== undefined)
-      .map((v) => String(v))
+      .map((v) => sanitizeText(v, "", 500))
       .join(" ")
       .toLowerCase();
     return haystack.includes(q);
@@ -467,7 +484,7 @@ function renderCountryTable(topCountries) {
     const tdRank = createTextEl("td", `#${idx + 1}`);
     const tdCountry = createTextEl(
       "td",
-      `${toSafeText(item.flag, "🌐")} ${toSafeText(item.country, "Unknown")}`
+      `${toSafeText(item.flag, "🌐", 16)} ${toSafeText(item.country, "Unknown", 100)}`
     );
 
     const tdCount = document.createElement("td");
@@ -496,7 +513,7 @@ function renderIpTable(topIps) {
 
   const fragment = document.createDocumentFragment();
   items.slice(0, 10).forEach((item) => {
-    const ipStr = toSafeText(item.ip);
+    const ipStr = toSafeText(item.ip, "", 64);
     const tr = document.createElement("tr");
     tr.className = "clickable-ip-row";
     tr.title = t("ip_row_title");
@@ -506,12 +523,12 @@ function renderIpTable(topIps) {
 
     const tdCountry = createTextEl(
       "td",
-      `${toSafeText(item.flag, "🌐")} ${toSafeText(item.country, "Unknown")}`
+      `${toSafeText(item.flag, "🌐", 16)} ${toSafeText(item.country, "Unknown", 100)}`
     );
-    const tdIsp = createTextEl("td", toSafeText(item.isp, "Unknown ISP"));
+    const tdIsp = createTextEl("td", toSafeText(item.isp, "Unknown ISP", 150));
 
     const tdTactic = document.createElement("td");
-    const tacticStr = toSafeText(item.top_category, "Unknown");
+    const tacticStr = toSafeText(item.top_category, "Unknown", 80);
     tdTactic.appendChild(
       createTextEl("span", tacticStr, `badge ${getCategoryBadgeClass(tacticStr)}`)
     );
@@ -560,16 +577,18 @@ function renderTimelineTable(timeline) {
   const fragment = document.createDocumentFragment();
 
   filtered.forEach((ev) => {
-    const tsStr = toSafeText(ev.timestamp);
-    const ipStr = toSafeText(ev.ip);
-    const pathStr = toSafeText(ev.path, "/");
-    const methodStr = toSafeText(ev.method, "GET");
-    const payloadStr = toSafeText(ev.payload);
-    const categoryStr = toSafeText(ev.category, "Unknown");
+    const tsStr = toSafeText(ev.timestamp, "", 40);
+    const ipStr = toSafeText(ev.ip, "", 64);
+    const pathStr = toSafeText(ev.path, "/", 300);
+    const methodStr = toSafeText(ev.method, "GET", 20);
+    const payloadStr = toSafeText(ev.payload, "", 400);
+    const categoryStr = toSafeText(ev.category, "Unknown", 80);
     const scoreNum = Number(ev.anomaly_score);
-    const safeScore = Number.isFinite(scoreNum) ? scoreNum : 0;
+    const safeScore = Number.isFinite(scoreNum)
+      ? Math.max(0, Math.min(100, Math.round(scoreNum)))
+      : 0;
 
-    const evId = toSafeText(ev.id) || `${tsStr}_${ipStr}_${methodStr}_${pathStr}`;
+    const evId = toSafeText(ev.id, "", 128) || `${tsStr}_${ipStr}_${methodStr}_${pathStr}`;
     if (nextSeen.size < MAX_SEEN_EVENT_IDS) {
       nextSeen.add(evId);
     }
@@ -588,11 +607,11 @@ function renderTimelineTable(timeline) {
 
     const tdSource = document.createElement("td");
     tdSource.appendChild(
-      document.createTextNode(`${toSafeText(ev.flag, "🌐")} `)
+      document.createTextNode(`${toSafeText(ev.flag, "🌐", 16)} `)
     );
     tdSource.appendChild(createTextEl("code", ipStr));
     tdSource.appendChild(document.createElement("br"));
-    tdSource.appendChild(createTextEl("span", toSafeText(ev.isp, "Unknown ISP"), "muted"));
+    tdSource.appendChild(createTextEl("span", toSafeText(ev.isp, "Unknown ISP", 150), "muted"));
 
     const tdMl = document.createElement("td");
     tdMl.appendChild(
@@ -644,9 +663,9 @@ function computeDerivedStats(data) {
   let highAnomalyCount = 0;
 
   observedTimeline.forEach((ev) => {
-    if (ev.ip) ipSet.add(toSafeText(ev.ip));
-    if (ev.country) countrySet.add(toSafeText(ev.country));
-    const cat = toSafeText(ev.category, "Unknown");
+    if (ev.ip) ipSet.add(toSafeText(ev.ip, "", 64));
+    if (ev.country) countrySet.add(toSafeText(ev.country, "", 100));
+    const cat = toSafeText(ev.category, "Unknown", 80);
     categories[cat] = (categories[cat] || 0) + 1;
     if (Number(ev.anomaly_score) >= 75) {
       highAnomalyCount += 1;
@@ -709,12 +728,11 @@ function applyDashboardData(data) {
 }
 
 async function fetchOnce() {
-  const hoursEl = document.getElementById("hours-select");
-  if (!hoursEl) return;
-  const hours = Number(hoursEl.value) || 24;
+  const hours = getValidatedHours();
   try {
     const res = await fetch(
-      `/api/stats?hours=${encodeURIComponent(hours)}&limit=50000`
+      `/api/stats?hours=${encodeURIComponent(hours)}&limit=50000`,
+      { cache: "no-store" }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -730,9 +748,7 @@ function connectStream() {
   disconnectStream();
   if (isStreamPaused) return;
 
-  const hoursEl = document.getElementById("hours-select");
-  if (!hoursEl) return;
-  const hours = Number(hoursEl.value) || 24;
+  const hours = getValidatedHours();
   const streamBadge = document.getElementById("stream-badge");
   const liveDot = document.getElementById("live-dot");
 
@@ -746,12 +762,16 @@ function connectStream() {
   );
 
   eventSource.addEventListener("stats", (event) => {
+    if (isStreamPaused) return;
     if (streamBadge) {
       streamBadge.textContent = "SSE LIVE";
       streamBadge.className = "badge badge-success";
     }
     if (liveDot) liveDot.classList.remove("paused");
     try {
+      if (typeof event.data === "string" && event.data.length > 10_000_000) {
+        throw new Error("SSE payload too large");
+      }
       const data = JSON.parse(event.data);
       applyDashboardData(data);
     } catch (e) {
@@ -836,7 +856,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (searchInput) {
       searchInput.addEventListener("input", (e) => {
-        searchQuery = e.target.value || "";
+        searchQuery = sanitizeText(e.target.value || "", "", 200);
         if (latestData) scheduleRenderTables(latestData);
       });
     }

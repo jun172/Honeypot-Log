@@ -1,12 +1,14 @@
 import asyncio
-from collections import OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import logging as std_logging
+import math
 import os
 from pathlib import Path
 import re
+import secrets
 import time
 from typing import Any, AsyncGenerator
 
@@ -19,10 +21,12 @@ from google.cloud import logging as gcp_logging
 from google.cloud import storage as gcp_storage
 import httpx
 import numpy as np
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
 def _load_dotenv_if_present() -> None:
@@ -78,13 +82,21 @@ _load_dotenv_if_present()
 logger = std_logging.getLogger("honeypot-dashboard")
 
 # ==========================================
-# 安全上限・キャッシュ設定
+# 安全上限・キャッシュ・ML設定
 # ==========================================
 MAX_ALLOWED_LIMIT = int(os.getenv("MAX_ALLOWED_LIMIT", "50000"))
 MAX_LOG_CACHE_ENTRIES = int(os.getenv("MAX_LOG_CACHE_ENTRIES", "128"))
 MAX_GEO_CACHE_ENTRIES = int(os.getenv("MAX_GEO_CACHE_ENTRIES", "10000"))
 MAX_GCS_BLOB_BYTES = int(os.getenv("MAX_GCS_BLOB_BYTES", str(50 * 1024 * 1024)))
 MIN_STREAM_INTERVAL_SEC = 1.0
+
+# 教師なしクラスタリング設定（0以下でサンプル数から自動決定）
+UNSUPERVISED_CLUSTERS = int(os.getenv("UNSUPERVISED_CLUSTERS", "0"))
+MAX_UNSUPERVISED_CLUSTERS = int(os.getenv("MAX_UNSUPERVISED_CLUSTERS", "8"))
+
+# Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: true）
+HIDE_AUTOMATED_RECON = os.getenv("HIDE_AUTOMATED_RECON", "true").lower() == "true"
+ANOMALY_SCORE_THRESHOLD = min(max(int(os.getenv("ANOMALY_SCORE_THRESHOLD", "60")), 0), 100)
 
 # ==========================================
 # 設定・定数（Cloud Logging + GCS + BigQuery 統合）
@@ -130,7 +142,8 @@ LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "5.0")), 1.0)
 
 # 全JSON表示モード: 既定でフィルタ・切り詰めを無効化（環境変数で個別に有効化可能）
 SHOW_ALL_JSON = os.getenv("SHOW_ALL_JSON", "true").lower() == "true"
-MAX_DISPLAY_TEXT_LEN = int(os.getenv("MAX_DISPLAY_TEXT_LEN", "0"))  # 0以下で無制限
+# 表示文字数上限（既定 4000 文字で巨大ペイロードによる画面フリーズを抑止。0以下で無制限）
+MAX_DISPLAY_TEXT_LEN = int(os.getenv("MAX_DISPLAY_TEXT_LEN", "4000"))
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
 ALLOWED_ORIGINS: list[str] = (
@@ -247,6 +260,7 @@ SYSTEM_NOISE_PATTERNS = (
 )
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_FORMULA_PREFIX_RE = re.compile(r"^[=+\-@\t\r]")
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -276,6 +290,14 @@ def sanitize_display_text(text: Any, max_len: int | None = None) -> str:
     if limit_len > 0 and len(s) > limit_len:
         return s[:limit_len] + "…(truncated)"
     return s
+
+
+def sanitize_spreadsheet_cell(value: Any, max_len: int | None = None) -> str:
+    """CSV / 表計算ソフト向けの先頭記号無害化（数式インジェクション対策）。"""
+    text = sanitize_display_text(value, max_len=max_len)
+    if _FORMULA_PREFIX_RE.match(text):
+        return "'" + text
+    return text
 
 
 def _safe_json_dumps(obj: Any, indent: int | None = None) -> str:
@@ -341,6 +363,9 @@ def _is_private_or_non_public_ip(ip: str, geo: dict[str, Any] | None = None) -> 
     return False
 
 
+# ==========================================
+# AI分析（教師あり分類 + 異常検知 + 教師なしクラスタリング）
+# ==========================================
 CLASSIFIER_PIPELINE: Pipeline | None = None
 ANOMALY_MODEL: IsolationForest | None = None
 
@@ -415,6 +440,319 @@ def _get_ready_models() -> tuple[Pipeline, IsolationForest]:
     return CLASSIFIER_PIPELINE, ANOMALY_MODEL
 
 
+def _shannon_entropy(text: str) -> float:
+    if not text:
+        return 0.0
+    sample = text[:2048]
+    counts = Counter(sample)
+    length = float(len(sample))
+    ent = 0.0
+    for c in counts.values():
+        p = c / length
+        if p > 0:
+            ent -= p * math.log2(p)
+    return round(min(ent, 8.0), 3)
+
+
+def _extract_host_from_record(rec: dict[str, Any]) -> str:
+    raw_json = rec.get("raw_json")
+    if isinstance(raw_json, dict):
+        headers = raw_json.get("headers")
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                if str(k).lower() == "host":
+                    if isinstance(v, list) and v:
+                        return str(v[0])[:120]
+                    if v:
+                        return str(v)[:120]
+        if raw_json.get("host"):
+            return str(raw_json.get("host"))[:120]
+    raw_line = str(rec.get("raw_request_line") or "")
+    m = re.search(r"([0-9]{1,3}(?:\.[0-9]{1,3}){3}[:_]\d{2,5})", raw_line)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _build_cluster_text_and_features(
+    rec: dict[str, Any],
+    host_burst_count: int = 1,
+) -> tuple[str, list[float], dict[str, Any]]:
+    event_type = str(rec.get("event_type") or "request").lower()
+    method = str(rec.get("method") or "GET").upper()
+    path = str(rec.get("path") or "/")
+    payload = str(rec.get("payload") or "")
+    raw_req = str(rec.get("raw_request_line") or "")
+    ua = str(rec.get("user_agent") or "")
+    raw_json = rec.get("raw_json")
+    code = _safe_int(raw_json.get("code"), 0) if isinstance(raw_json, dict) else 0
+    host = _extract_host_from_record(rec)
+
+    combined_raw = f"{raw_req} {payload[:1000]}"
+    non_ascii_cnt = sum(1 for ch in combined_raw if ord(ch) > 127)
+    non_ascii_ratio = round(non_ascii_cnt / max(len(combined_raw), 1), 4)
+    entropy = _shannon_entropy(combined_raw)
+    is_tls_hello = 1.0 if ("\x16\x03" in raw_req or "\\u0016\\u0003" in raw_req) else 0.0
+    is_bad_req = 1.0 if (event_type == "bad_request" or code == 400) else 0.0
+    is_mcp_or_sse = 1.0 if any(tok in f"{path} {payload}".lower() for tok in ("/mcp", "/sse", "text/event-stream")) else 0.0
+    is_mgld = 1.0 if "mgldd" in combined_raw.lower() else 0.0
+    is_scanner_ua = 1.0 if any(tok in ua.lower() for tok in ("zgrab", "infrawatch", "nuclei", "masscan", "python-requests", "curl")) else 0.0
+    path_depth = float(min(len([p for p in path.split("/") if p]), 20))
+    header_cnt = float(min(_safe_int(rec.get("header_count"), 0), 100))
+    burst_log = float(round(math.log1p(max(host_burst_count, 1)), 3))
+
+    ua_clean = re.sub(r"\([^)]*\)", "", ua).strip()
+    tokens = [
+        f"ev:{event_type}",
+        f"m:{method}",
+        f"p:{path.split('?')[0][:80]}",
+        f"ua:{ua_clean[:60]}",
+    ]
+    if is_tls_hello > 0:
+        tokens.append("proto:tls_handshake")
+    if is_mgld > 0:
+        tokens.append("proto:mgldd_probe")
+    if is_mcp_or_sse > 0:
+        tokens.append("target:mcp_sse")
+    if is_bad_req > 0:
+        tokens.append("status:400_bad_request")
+    if host:
+        tokens.append(f"host:{host[:60]}")
+    if any(k in combined_raw.lower() for k in ("querybasiccfg", "<?xml", "boaform", "cgi-bin", "wp-login", ".env", ".git")):
+        tokens.append("probe:exploit_or_config")
+
+    cluster_text = " ".join(tokens)[:2048]
+    num_features = [
+        non_ascii_ratio,
+        entropy,
+        is_tls_hello,
+        is_bad_req,
+        is_mcp_or_sse,
+        is_mgld,
+        is_scanner_ua,
+        path_depth,
+        header_cnt,
+        burst_log,
+    ]
+    meta = {
+        "host": host,
+        "non_ascii_ratio": non_ascii_ratio,
+        "entropy": entropy,
+        "is_tls_hello": bool(is_tls_hello),
+        "is_bad_req": bool(is_bad_req),
+        "is_mcp_or_sse": bool(is_mcp_or_sse),
+        "is_mgld": bool(is_mgld),
+        "is_scanner_ua": bool(is_scanner_ua),
+        "ua": ua,
+        "path": path,
+        "method": method,
+        "host_burst_count": host_burst_count,
+    }
+    return cluster_text, num_features, meta
+
+
+def _generate_cluster_label(
+    cluster_idx: int,
+    member_metas: list[dict[str, Any]],
+    top_terms: list[str],
+) -> str:
+    """クラスタ内の特徴集計から、人間が理解しやすい自動カテゴリ名を生成する。"""
+    n = max(len(member_metas), 1)
+    tls_rate = sum(1 for m in member_metas if m["is_tls_hello"]) / n
+    mgld_rate = sum(1 for m in member_metas if m["is_mgld"]) / n
+    mcp_rate = sum(1 for m in member_metas if m["is_mcp_or_sse"]) / n
+    bad_rate = sum(1 for m in member_metas if m["is_bad_req"]) / n
+    high_bin_rate = sum(1 for m in member_metas if m["non_ascii_ratio"] >= 0.15 or m["entropy"] >= 4.8) / n
+    avg_burst = sum(m["host_burst_count"] for m in member_metas) / n
+
+    uas = Counter(
+        re.split(r"[/\s(]", m["ua"])[0]
+        for m in member_metas
+        if m["ua"]
+    )
+    for m in member_metas:
+        ua_l = m["ua"].lower()
+        if "zgrab" in ua_l:
+            uas["zgrab"] += 2
+        elif "infrawatch" in ua_l:
+            uas["Infrawatch"] += 2
+
+    if tls_rate >= 0.5:
+        return f"C{cluster_idx + 1}: TLS Handshake on HTTP Port"
+    if mgld_rate >= 0.5:
+        return f"C{cluster_idx + 1}: MGLNDD / Non-HTTP Banner Probe"
+    if high_bin_rate >= 0.5 and bad_rate >= 0.5:
+        return f"C{cluster_idx + 1}: Binary / Malformed Payload (400)"
+    if mcp_rate >= 0.5:
+        suffix = " (Multi-IP Burst)" if avg_burst >= 2.0 else ""
+        return f"C{cluster_idx + 1}: MCP / SSE Endpoint Recon{suffix}"
+    if uas:
+        top_ua, ua_cnt = uas.most_common(1)[0]
+        if ua_cnt / n >= 0.4 and top_ua:
+            return f"C{cluster_idx + 1}: Scanner / Monitor ({top_ua})"
+
+    paths = Counter(m["path"].split("?")[0] for m in member_metas if m["path"])
+    top_path = paths.most_common(1)[0][0] if paths else "/"
+    if bad_rate >= 0.6:
+        return f"C{cluster_idx + 1}: Protocol Error / Bad Request ({top_path})"
+
+    readable_terms = [
+        t.split(":", 1)[-1]
+        for t in top_terms
+        if not t.startswith(("ev:", "host:")) and len(t.split(":", 1)[-1]) > 1
+    ][:2]
+    if readable_terms:
+        return f"C{cluster_idx + 1}: {' / '.join(readable_terms)}"
+    return f"C{cluster_idx + 1}: Anomaly Probe ({top_path})"
+
+
+def run_unsupervised_clustering(
+    records: list[dict[str, Any]],
+    host_burst_map: dict[str, int] | None = None,
+    n_clusters_override: int = 0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    教師なしクラスタリング（TF-IDF + 数値特徴 + MiniBatchKMeans）を実行し、
+    各レコードのクラスタ割り当てと、クラスタ集計サマリーを返す。
+    """
+    if not records:
+        return [], []
+
+    burst_lookup = host_burst_map or {}
+    texts: list[str] = []
+    num_rows: list[list[float]] = []
+    metas: list[dict[str, Any]] = []
+
+    for rec in records:
+        host = _extract_host_from_record(rec)
+        burst_cnt = burst_lookup.get(host, 1) if host else 1
+        txt, feats, meta = _build_cluster_text_and_features(rec, host_burst_count=burst_cnt)
+        texts.append(txt)
+        num_rows.append(feats)
+        metas.append(meta)
+
+    n_samples = len(records)
+    if n_samples == 1:
+        label = _generate_cluster_label(0, metas, texts[0].split()[:4])
+        assignments = [
+            {
+                "cluster_id": 0,
+                "cluster_label": label,
+                "cluster_distance": 0.0,
+                "cluster_features": metas[0],
+            }
+        ]
+        summary = [
+            {
+                "cluster_id": 0,
+                "label": label,
+                "count": 1,
+                "share_pct": 100.0,
+                "top_terms": texts[0].split()[:5],
+                "sample_paths": [metas[0]["path"]],
+            }
+        ]
+        return assignments, summary
+
+    if n_clusters_override > 0:
+        k = min(n_clusters_override, n_samples)
+    elif UNSUPERVISED_CLUSTERS > 0:
+        k = min(UNSUPERVISED_CLUSTERS, n_samples)
+    else:
+        k = int(
+            np.clip(
+                round(math.sqrt(n_samples / 2.0)) + 1,
+                2,
+                min(MAX_UNSUPERVISED_CLUSTERS, n_samples),
+            )
+        )
+
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2),
+        max_features=256,
+        sublinear_tf=True,
+        lowercase=True,
+    )
+    try:
+        sparse_mat = vectorizer.fit_transform(texts)
+        # spmatrix に直接 .todense() / .toarray() を呼ばず、汎用的な変換を行う
+        X_txt = np.asarray(sparse_mat.toarray(), dtype=np.float64) * 1.4  # type: ignore[union-attr,attr-defined]
+    except ValueError:
+        X_txt = np.zeros((n_samples, 1), dtype=np.float64)
+
+    scaler = StandardScaler()
+    X_num = scaler.fit_transform(np.asarray(num_rows, dtype=np.float64)) * 0.85
+    X_combined = np.hstack([X_txt, X_num]).astype(np.float64)
+
+    km = MiniBatchKMeans(
+        n_clusters=k,
+        random_state=42,
+        batch_size=min(256, n_samples),
+        n_init=5,
+    )
+    cluster_ids = km.fit_predict(X_combined)
+    distances = np.linalg.norm(X_combined - km.cluster_centers_[cluster_ids], axis=1)
+
+    vocab = vectorizer.get_feature_names_out() if hasattr(vectorizer, "get_feature_names_out") else np.array([])
+    txt_dim = X_txt.shape[1]
+
+    grouped_indices: dict[int, list[int]] = defaultdict(list)
+    for idx, cid in enumerate(cluster_ids):
+        grouped_indices[int(cid)].append(idx)
+
+    ordered_raw_cids = sorted(
+        grouped_indices.keys(),
+        key=lambda c: len(grouped_indices[c]),
+        reverse=True,
+    )
+    raw_to_sorted_id = {raw_c: new_i for new_i, raw_c in enumerate(ordered_raw_cids)}
+
+    id_to_label: dict[int, str] = {}
+    summary_list: list[dict[str, Any]] = []
+
+    for raw_c in ordered_raw_cids:
+        new_cid = raw_to_sorted_id[raw_c]
+        idxs = grouped_indices[raw_c]
+        member_metas = [metas[i] for i in idxs]
+
+        top_terms: list[str] = []
+        if len(vocab) > 0 and txt_dim == len(vocab):
+            center_txt = km.cluster_centers_[raw_c][:txt_dim]
+            top_term_idxs = np.argsort(center_txt)[::-1][:6]
+            top_terms = [str(vocab[ti]) for ti in top_term_idxs if center_txt[ti] > 0.05]
+
+        label = _generate_cluster_label(new_cid, member_metas, top_terms)
+        id_to_label[new_cid] = label
+
+        path_counter = Counter(m["path"].split("?")[0] for m in member_metas if m["path"])
+        sample_paths = [p for p, _ in path_counter.most_common(3)]
+
+        summary_list.append(
+            {
+                "cluster_id": new_cid,
+                "label": label,
+                "count": len(idxs),
+                "share_pct": round((len(idxs) / n_samples) * 100.0, 1),
+                "top_terms": top_terms,
+                "sample_paths": sample_paths,
+            }
+        )
+
+    assignments: list[dict[str, Any]] = []
+    for idx in range(n_samples):
+        new_cid = raw_to_sorted_id[int(cluster_ids[idx])]
+        assignments.append(
+            {
+                "cluster_id": new_cid,
+                "cluster_label": id_to_label[new_cid],
+                "cluster_distance": round(float(distances[idx]), 3),
+                "cluster_features": metas[idx],
+            }
+        )
+
+    return assignments, summary_list
+
+
 def classify_and_score(
     event_type: str,
     method: str,
@@ -457,7 +795,7 @@ def classify_and_score(
         if category == "Automated Recon / Scanner":
             category = "Credential / Env Theft"
             confidence = max(confidence, 82.0)
-    elif event_type == "bad_request" or "xpanse" in lower_sig or "mglndd" in lower_sig:
+    elif event_type == "bad_request" or "xpanse" in lower_sig or "mgldd" in lower_sig:
         if category == "Credential / Env Theft":
             category = "Automated Recon / Scanner"
 
@@ -472,6 +810,16 @@ def classify_and_score(
         anomaly_pct = max(anomaly_pct, 78)
 
     return category, confidence, anomaly_pct
+
+
+def _is_anomalous_event(category: str, anomaly_score: int, event_type: str = "") -> bool:
+    """Automated Recon / Scanner を除外し、異常イベントのみを対象とする判定。"""
+    cat_norm = (category or "").strip()
+    if HIDE_AUTOMATED_RECON and cat_norm == "Automated Recon / Scanner":
+        return False
+    if cat_norm == "RCE / Command Injection" or (event_type or "").strip().lower() == "bad_request":
+        return True
+    return anomaly_score >= ANOMALY_SCORE_THRESHOLD
 
 
 def _extract_first_ipv4(text: Any) -> str | None:
@@ -1254,6 +1602,10 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         SKIP_GOOGLE_LLC,
         SKIP_PRIVATE_IPS,
         SKIP_SYSTEM_NOISE,
+        UNSUPERVISED_CLUSTERS,
+        MAX_UNSUPERVISED_CLUSTERS,
+        HIDE_AUTOMATED_RECON,
+        ANOMALY_SCORE_THRESHOLD,
     )
     now_mono = time.monotonic()
     cached = LOG_RESPONSE_CACHE.get(cache_key)
@@ -1266,15 +1618,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
     raw_records, is_demo_mode = await fetch_logs_async(hours=hours, limit=effective_limit)
     geo_map = await resolve_geoip_batch([r["ip"] for r in raw_records])
 
-    category_counts: dict[str, int] = {}
-    country_counts: dict[str, dict[str, Any]] = {}
-    ip_counts: dict[str, dict[str, Any]] = {}
-    timeline_events: list[dict[str, Any]] = []
-    all_json_records: list[dict[str, Any]] = []
-    map_points_dict: dict[str, dict[str, Any]] = {}
-
-    total_bytes = 0
-    high_anomaly_count = 0
+    anomalous_items: list[tuple[dict[str, Any], dict[str, Any], str, str, float, int]] = []
+    host_counter: Counter[str] = Counter()
 
     for rec in raw_records:
         ip = rec["ip"]
@@ -1287,9 +1632,6 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         if SKIP_JAPAN_IPS and _is_japan_geo(geo):
             continue
 
-        total_bytes += rec["bytes"]
-        display_country = sanitize_display_text(f"{geo['country_ja']} ({geo['country']})", max_len=160)
-
         category, confidence, anomaly_score = classify_and_score(
             event_type=rec.get("event_type", "request"),
             method=rec["method"],
@@ -1299,10 +1641,49 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             raw_request_line=rec.get("raw_request_line", ""),
             header_count=rec["header_count"],
         )
+
+        if not _is_anomalous_event(category, anomaly_score, rec.get("event_type", "")):
+            continue
+
+        display_country = sanitize_display_text(f"{geo['country_ja']} ({geo['country']})", max_len=160)
+        host = _extract_host_from_record(rec)
+        if host:
+            host_counter[host] += 1
+
+        anomalous_items.append((rec, geo, display_country, category, confidence, anomaly_score))
+
+    cluster_assignments, cluster_summary = run_unsupervised_clustering(
+        [item[0] for item in anomalous_items],
+        host_burst_map=dict(host_counter),
+    )
+
+    category_counts: dict[str, int] = {}
+    cluster_counts: dict[str, int] = {}
+    country_counts: dict[str, dict[str, Any]] = {}
+    ip_counts: dict[str, dict[str, Any]] = {}
+    timeline_events: list[dict[str, Any]] = []
+    all_json_records: list[dict[str, Any]] = []
+    map_points_dict: dict[str, dict[str, Any]] = {}
+
+    total_bytes = 0
+    high_anomaly_count = 0
+
+    for idx, (rec, geo, display_country, category, confidence, anomaly_score) in enumerate(anomalous_items):
+        ip = rec["ip"]
+        total_bytes += rec["bytes"]
+
         if anomaly_score >= 75:
             high_anomaly_count += 1
 
+        cl_info = cluster_assignments[idx] if idx < len(cluster_assignments) else {
+            "cluster_id": 0,
+            "cluster_label": "C1: General",
+            "cluster_distance": 0.0,
+        }
+        cluster_label = cl_info["cluster_label"]
+
         category_counts[category] = category_counts.get(category, 0) + 1
+        cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
 
         c_key = f"{geo['flag']} {display_country}"
         country_counts.setdefault(
@@ -1330,6 +1711,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "isp": geo["isp"],
                 "count": 0,
                 "top_category": category,
+                "top_cluster": cluster_label,
             },
         )["count"] += 1
 
@@ -1348,6 +1730,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                     "isp": geo["isp"],
                     "count": 0,
                     "category": category,
+                    "cluster_label": cluster_label,
                 },
             )["count"] += 1
 
@@ -1377,6 +1760,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "category": category,
                 "confidence": confidence,
                 "anomaly_score": anomaly_score,
+                "cluster_id": cl_info["cluster_id"],
+                "cluster_label": cluster_label,
+                "cluster_distance": cl_info["cluster_distance"],
             }
             timeline_events.append(event_obj)
             all_json_records.append(
@@ -1387,6 +1773,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                     "ip": ip,
                     "country": display_country,
                     "category": category,
+                    "anomaly_score": anomaly_score,
+                    "cluster_id": cl_info["cluster_id"],
+                    "cluster_label": cluster_label,
                     "json": rec.get("raw_json"),
                     "json_pretty": safe_pretty,
                 }
@@ -1396,13 +1785,18 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "is_demo_mode": is_demo_mode,
         "show_all_json": SHOW_ALL_JSON,
+        "only_anomalous": True,
+        "hide_automated_recon": HIDE_AUTOMATED_RECON,
         "summary": {
             "total_attacks": len(timeline_events),
             "unique_ips": len(ip_counts),
             "unique_countries": len(country_counts),
             "high_anomaly_count": high_anomaly_count,
+            "unsupervised_clusters": len(cluster_summary),
         },
         "categories": category_counts,
+        "clusters": cluster_counts,
+        "cluster_summary": cluster_summary,
         "top_countries": sorted(country_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "top_ips": sorted(ip_counts.values(), key=lambda x: x["count"], reverse=True)[:10],
         "map_points": list(map_points_dict.values()),
@@ -1435,12 +1829,40 @@ if ALLOWED_ORIGINS:
     )
 
 
+def _build_csp_header(path: str, script_nonce: str) -> str:
+    if path in {"/json", "/all-json"}:
+        return (
+            "default-src 'self'; "
+            f"script-src 'self' 'nonce-{script_nonce}'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none';"
+        )
+    return (
+        "default-src 'self'; "
+        "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+        "img-src 'self' data: blob: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; "
+        "connect-src 'self'; "
+        "font-src 'self' data:; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'none';"
+    )
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
+    nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = nonce
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Content-Security-Policy", _build_csp_header(request.url.path, nonce))
     return response
 
 
@@ -1458,34 +1880,35 @@ def _resolve_static_file(filename: str) -> Path:
     return candidate
 
 
-def _render_all_json_html() -> str:
-    return """<!DOCTYPE html>
+def _render_all_json_html(script_nonce: str) -> str:
+    safe_nonce = re.sub(r"[^A-Za-z0-9_-]", "", script_nonce)
+    return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>All JSON Logs Viewer</title>
+  <title>All JSON Logs Viewer (Anomalous Only)</title>
   <style>
-    body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }
-    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; background: #1e293b; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
-    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    input, button, select { background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
-    button { cursor: pointer; background: #2563eb; border-color: #2563eb; }
-    button:hover { background: #1d4ed8; }
-    .meta { font-size: 12px; color: #94a3b8; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-    .card-head { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; font-size: 12px; color: #93c5fd; margin-bottom: 8px; }
-    pre { margin: 0; white-space: pre-wrap; word-break: break-word; background: #020617; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #f1f5f9; max-height: 520px; overflow: auto; }
+    body {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }}
+    header {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; background: #1e293b; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }}
+    .controls {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    input, button, select {{ background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }}
+    button {{ cursor: pointer; background: #2563eb; border-color: #2563eb; }}
+    button:hover {{ background: #1d4ed8; }}
+    .meta {{ font-size: 12px; color: #94a3b8; }}
+    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }}
+    .card-head {{ display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; font-size: 12px; color: #93c5fd; margin-bottom: 8px; }}
+    pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; background: #020617; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #f1f5f9; max-height: 520px; overflow: auto; }}
   </style>
 </head>
 <body>
   <header>
     <div>
-      <strong>All JSON Logs Viewer</strong>
+      <strong>All JSON Logs Viewer (Anomalous Only)</strong>
       <div class="meta" id="status-bar">Connecting...</div>
     </div>
     <div class="controls">
-      <input id="filter-input" type="text" placeholder="キーワード検索 (IP, path, source, JSON...)" />
+      <input id="filter-input" type="text" placeholder="キーワード検索 (IP, path, source, cluster, JSON...)" />
       <select id="hours-select">
         <option value="1">1h</option>
         <option value="6">6h</option>
@@ -1498,7 +1921,7 @@ def _render_all_json_html() -> str:
     </div>
   </header>
   <main id="json-list"></main>
-  <script>
+  <script nonce="{safe_nonce}">
     const listEl = document.getElementById("json-list");
     const statusEl = document.getElementById("status-bar");
     const filterEl = document.getElementById("filter-input");
@@ -1510,95 +1933,97 @@ def _render_all_json_html() -> str:
     let eventSource = null;
     let streaming = true;
 
-    function renderRecords(records, updatedAt) {
+    function renderRecords(records, updatedAt) {{
       const q = (filterEl.value || "").trim().toLowerCase();
       const filtered = q
-        ? records.filter((r) => {
-            const hay = `${r.timestamp || ""} ${r.source || ""} ${r.ip || ""} ${r.country || ""} ${r.category || ""} ${r.json_pretty || ""}`.toLowerCase();
+        ? records.filter((r) => {{
+            const hay = `${{r.timestamp || ""}} ${{r.source || ""}} ${{r.ip || ""}} ${{r.country || ""}} ${{r.category || ""}} ${{r.cluster_label || ""}} ${{r.json_pretty || ""}}`.toLowerCase();
             return hay.includes(q);
-          })
+          }})
         : records;
 
-      statusEl.textContent = `Updated: ${updatedAt || "-"} | Showing: ${filtered.length} / ${records.length} JSON records`;
+      statusEl.textContent = `Updated: ${{updatedAt || "-"}} | Showing: ${{filtered.length}} / ${{records.length}} anomalous JSON records`;
       listEl.innerHTML = "";
 
       const frag = document.createDocumentFragment();
-      for (const rec of filtered) {
+      for (const rec of filtered) {{
         const card = document.createElement("section");
         card.className = "card";
 
         const head = document.createElement("div");
         head.className = "card-head";
-        head.textContent = `[${rec.timestamp || ""}] source=${rec.source || ""} | ip=${rec.ip || ""} (${rec.country || ""}) | ${rec.category || ""}`;
+        head.textContent = `[${{rec.timestamp || ""}}] source=${{rec.source || ""}} | ip=${{rec.ip || ""}} (${{rec.country || ""}}) | cat=${{rec.category || ""}} | cluster=${{rec.cluster_label || ""}}`;
 
         const pre = document.createElement("pre");
-        pre.textContent = rec.json_pretty || JSON.stringify(rec.json || {}, null, 2);
+        pre.textContent = rec.json_pretty || JSON.stringify(rec.json || {{}}, null, 2);
 
         card.appendChild(head);
         card.appendChild(pre);
         frag.appendChild(card);
-      }
+      }}
       listEl.appendChild(frag);
-    }
+    }}
 
-    async function fetchOnce() {
+    async function fetchOnce() {{
       const hours = encodeURIComponent(hoursEl.value || "24");
-      const resp = await fetch(`/api/json/all?hours=${hours}&limit=50000`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const resp = await fetch(`/api/json/all?hours=${{hours}}&limit=50000`);
+      if (!resp.ok) throw new Error(`HTTP ${{resp.status}}`);
       const data = await resp.json();
       latestRecords = Array.isArray(data.records) ? data.records : [];
       renderRecords(latestRecords, data.updated_at);
-    }
+    }}
 
-    function connectStream() {
-      if (eventSource) {
+    function connectStream() {{
+      if (eventSource) {{
         eventSource.close();
         eventSource = null;
-      }
+      }}
       if (!streaming) return;
       const hours = encodeURIComponent(hoursEl.value || "24");
-      eventSource = new EventSource(`/api/stream?hours=${hours}&limit=50000`);
-      eventSource.addEventListener("stats", (ev) => {
-        try {
+      eventSource = new EventSource(`/api/stream?hours=${{hours}}&limit=50000`);
+      eventSource.addEventListener("stats", (ev) => {{
+        try {{
           const data = JSON.parse(ev.data);
           latestRecords = Array.isArray(data.all_json_records)
             ? data.all_json_records
-            : (data.timeline || []).map((t) => ({
+            : (data.timeline || []).map((t) => ({{
                 id: t.id,
                 timestamp: t.timestamp,
                 source: t.source,
                 ip: t.ip,
                 country: t.country,
                 category: t.category,
+                cluster_id: t.cluster_id,
+                cluster_label: t.cluster_label,
                 json: t.raw_json,
                 json_pretty: t.raw_json_pretty || t.payload || "",
-              }));
+              }}));
           renderRecords(latestRecords, data.updated_at);
-        } catch (err) {
+        }} catch (err) {{
           console.error(err);
-        }
-      });
-      eventSource.onerror = () => {
+        }}
+      }});
+      eventSource.onerror = () => {{
         statusEl.textContent = "Stream reconnecting...";
-      };
-    }
+      }};
+    }}
 
     filterEl.addEventListener("input", () => renderRecords(latestRecords, statusEl.textContent));
-    hoursEl.addEventListener("change", () => {
+    hoursEl.addEventListener("change", () => {{
       fetchOnce().catch(console.error);
       connectStream();
-    });
+    }});
     refreshBtn.addEventListener("click", () => fetchOnce().catch(console.error));
-    toggleStreamBtn.addEventListener("click", () => {
+    toggleStreamBtn.addEventListener("click", () => {{
       streaming = !streaming;
       toggleStreamBtn.textContent = streaming ? "ストリーム停止" : "ストリーム再開";
       if (streaming) connectStream();
       else if (eventSource) eventSource.close();
-    });
+    }});
 
-    fetchOnce().catch((e) => {
-      statusEl.textContent = `Fetch error: ${e.message}`;
-    });
+    fetchOnce().catch((e) => {{
+      statusEl.textContent = `Fetch error: ${{e.message}}`;
+    }});
     connectStream();
   </script>
 </body>
@@ -1615,8 +2040,9 @@ async def serve_index() -> FileResponse:
 
 @app.get("/json")
 @app.get("/all-json")
-async def serve_all_json_viewer() -> StreamingResponse:
-    html = _render_all_json_html()
+async def serve_all_json_viewer(request: Request) -> StreamingResponse:
+    nonce = getattr(request.state, "csp_nonce", "")
+    html = _render_all_json_html(nonce)
     return StreamingResponse(iter([html]), media_type="text/html; charset=utf-8")
 
 
@@ -1631,6 +2057,8 @@ async def get_all_json(
         content={
             "updated_at": payload.get("updated_at"),
             "count": len(records),
+            "clusters": payload.get("clusters", {}),
+            "cluster_summary": payload.get("cluster_summary", []),
             "records": records,
         }
     )

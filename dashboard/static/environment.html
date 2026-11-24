@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"
+  />
   <title>Development Environment &amp; Architecture | Honeypot Threat Intelligence</title>
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" type="image/png" href="/static/AIWeb.png" />
@@ -635,36 +639,6 @@
     </div>
   </main>
 
-  <script>
-    (function () {
-      const jaBtn = document.getElementById("lang-ja-btn");
-      const enBtn = document.getElementById("lang-en-btn");
-      const jaContent = document.getElementById("env-content-ja");
-      const enContent = document.getElementById("env-content-en");
-
-      function setLanguage(lang) {
-        const isEn = lang === "en";
-        document.documentElement.lang = isEn ? "en" : "ja";
-
-        if (jaContent && enContent) {
-          jaContent.style.display = isEn ? "none" : "";
-          enContent.style.display = isEn ? "" : "none";
-        }
-
-        if (jaBtn && enBtn) {
-          jaBtn.classList.toggle("active", !isEn);
-          enBtn.classList.toggle("active", isEn);
-          jaBtn.setAttribute("aria-pressed", String(!isEn));
-          enBtn.setAttribute("aria-pressed", String(isEn));
-        }
-      }
-
-      if (jaBtn && enBtn) {
-        jaBtn.addEventListener("click", () => setLanguage("ja"));
-        enBtn.addEventListener("click", () => setLanguage("en"));
-      }
-    })();
-  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>
