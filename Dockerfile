@@ -7,4 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY dashboard/ .
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# startup.sh に実行権限を付与
+RUN chmod +x /app/startup.sh
+
+CMD ["/app/startup.sh"]
