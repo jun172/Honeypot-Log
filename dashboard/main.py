@@ -2,6 +2,7 @@ import asyncio
 from collections import Counter, OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging as std_logging
 import math
@@ -98,6 +99,23 @@ MAX_UNSUPERVISED_CLUSTERS = int(os.getenv("MAX_UNSUPERVISED_CLUSTERS", "8"))
 HIDE_AUTOMATED_RECON = os.getenv("HIDE_AUTOMATED_RECON", "true").lower() == "true"
 ANOMALY_SCORE_THRESHOLD = min(max(int(os.getenv("ANOMALY_SCORE_THRESHOLD", "60")), 0), 100)
 
+# 監査ログ・運用者操作の除外設定（既定: 除外する）
+EXCLUDE_AUDIT_AND_ADMIN_LOGS = (
+    os.getenv("EXCLUDE_AUDIT_AND_ADMIN_LOGS", "true").lower() == "true"
+)
+_RAW_ADMIN_IPS = os.getenv("ADMIN_IPS", "59.146.155.164").strip()
+ADMIN_IPS: set[str] = (
+    {x.strip() for x in _RAW_ADMIN_IPS.split(",") if x.strip()}
+    if _RAW_ADMIN_IPS
+    else set()
+)
+_RAW_ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "mujwtaxz@gmail.com").strip()
+ADMIN_EMAILS: set[str] = (
+    {x.strip().lower() for x in _RAW_ADMIN_EMAILS.split(",") if x.strip()}
+    if _RAW_ADMIN_EMAILS
+    else set()
+)
+
 # ==========================================
 # 設定・定数（Cloud Logging + GCS + BigQuery 統合）
 # ==========================================
@@ -124,7 +142,6 @@ BQ_TABLE_NAME = os.getenv("BQ_TABLE_NAME", "run_googleapis_com_stdout")
 BQ_TABLE_ID = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_NAME}"
 ENABLE_BIGQUERY_LOGS = os.getenv("ENABLE_BIGQUERY_LOGS", "true").lower() == "true"
 
-# "all" -> logging + gcs + bigquery / "both" -> logging + gcs / "bigquery" / "logging" / "gcs"
 LOG_SOURCE_MODE = os.getenv("LOG_SOURCE_MODE", "all").strip().lower()
 LOG_FILTER = os.getenv("LOG_FILTER", "").strip()
 LOG_GCS_PREFIX = os.getenv("LOG_GCS_PREFIX", "").strip()
@@ -140,9 +157,7 @@ STREAM_INTERVAL_SEC = max(
 )
 LOG_CACHE_TTL = max(float(os.getenv("LOG_CACHE_TTL", "5.0")), 1.0)
 
-# 全JSON表示モード: 既定でフィルタ・切り詰めを無効化（環境変数で個別に有効化可能）
 SHOW_ALL_JSON = os.getenv("SHOW_ALL_JSON", "true").lower() == "true"
-# 表示文字数上限（既定 4000 文字で巨大ペイロードによる画面フリーズを抑止。0以下で無制限）
 MAX_DISPLAY_TEXT_LEN = int(os.getenv("MAX_DISPLAY_TEXT_LEN", "4000"))
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
@@ -293,7 +308,6 @@ def sanitize_display_text(text: Any, max_len: int | None = None) -> str:
 
 
 def sanitize_spreadsheet_cell(value: Any, max_len: int | None = None) -> str:
-    """CSV / 表計算ソフト向けの先頭記号無害化（数式インジェクション対策）。"""
     text = sanitize_display_text(value, max_len=max_len)
     if _FORMULA_PREFIX_RE.match(text):
         return "'" + text
@@ -363,6 +377,32 @@ def _is_private_or_non_public_ip(ip: str, geo: dict[str, Any] | None = None) -> 
     return False
 
 
+def _is_audit_or_admin_log(src_ip: str, raw_text: str, user_agent: str = "") -> bool:
+    """GCP監査ログや運用者アカウント/IPの操作を外部攻撃ログと分離する。"""
+    if not EXCLUDE_AUDIT_AND_ADMIN_LOGS:
+        return False
+
+    ip_clean = (src_ip or "").strip()
+    if ADMIN_IPS and ip_clean in ADMIN_IPS:
+        return True
+
+    lower_all = f"{raw_text} {user_agent}".lower()
+    if (
+        "google.cloud.audit.auditlog" in lower_all
+        or "cloudaudit.googleapis.com" in lower_all
+        or "setiampolicy" in lower_all
+        or "compute.firewalls" in lower_all
+        or "compute.instances.setmetadata" in lower_all
+        or "google-cloud-sdk gcloud/" in lower_all
+    ):
+        return True
+
+    if ADMIN_EMAILS and any(email in lower_all for email in ADMIN_EMAILS):
+        return True
+
+    return False
+
+
 # ==========================================
 # AI分析（教師あり分類 + 異常検知 + 教師なしクラスタリング）
 # ==========================================
@@ -379,8 +419,8 @@ def init_ml_models() -> None:
         ("GET /shell?cmd=cat+/etc/passwd;+uname+-a", "RCE / Command Injection"),
         ("POST /vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php <?php system('id'); ?>", "RCE / Command Injection"),
         ("GET /boaform/admin/formPing?target_addr=127.0.0.1|busybox", "RCE / Command Injection"),
-        ("POST / process.mainModule.require child_process spawn /bin/sh", "RCE / Command Injection"),
-        ("SetIamPolicy service-agent-manager", "RCE / Command Injection"),
+        ("POST / process.mainModule.require child_process spawn /bin/sh Next-Action", "RCE / Command Injection"),
+        ("POST / ; id ; uname -a ; /bin/bash -c", "RCE / Command Injection"),
         ("GET /.env HTTP/1.1", "Credential / Env Theft"),
         ("GET /.git/config HTTP/1.1", "Credential / Env Theft"),
         ("GET /config.json aws_secret_access_key", "Credential / Env Theft"),
@@ -393,16 +433,15 @@ def init_ml_models() -> None:
         ("POST /admin/login username=root&password=admin", "CMS / Admin Brute Force"),
         ("GET /search?id=1' UNION SELECT 1,user(),database()--", "SQLi / XSS Probe"),
         ("GET /index.php?page=1 OR 1=1", "SQLi / XSS Probe"),
+        ("GET /item?id=1 SLEEP(5) BENCHMARK(1000000,MD5(1))", "SQLi / XSS Probe"),
         ("GET /?q=<script>alert(document.cookie)</script>", "SQLi / XSS Probe"),
         ("GET /../../../../etc/passwd", "SQLi / XSS Probe"),
-        ("SetIamPolicy Service account does not exist concurrent policy changes", "SQLi / XSS Probe"),
         ("GET / cortex-xpanse scanning-activity", "Automated Recon / Scanner"),
         ("GET / mglndd bad_request 400", "Automated Recon / Scanner"),
         ("GET /robots.txt python-requests/2.31.0", "Automated Recon / Scanner"),
         ("GET /favicon.ico zgrab/0.x", "Automated Recon / Scanner"),
         ("GET /sitemap.xml masscan/1.3", "Automated Recon / Scanner"),
         ("HEAD / HTTP/1.1 nuclei", "Automated Recon / Scanner"),
-        ("CreateSink honeypot-http-to-bq", "Automated Recon / Scanner"),
     ]
 
     pipeline = Pipeline(
@@ -556,7 +595,6 @@ def _generate_cluster_label(
     member_metas: list[dict[str, Any]],
     top_terms: list[str],
 ) -> str:
-    """クラスタ内の特徴集計から、人間が理解しやすい自動カテゴリ名を生成する。"""
     n = max(len(member_metas), 1)
     tls_rate = sum(1 for m in member_metas if m["is_tls_hello"]) / n
     mgld_rate = sum(1 for m in member_metas if m["is_mgld"]) / n
@@ -565,11 +603,7 @@ def _generate_cluster_label(
     high_bin_rate = sum(1 for m in member_metas if m["non_ascii_ratio"] >= 0.15 or m["entropy"] >= 4.8) / n
     avg_burst = sum(m["host_burst_count"] for m in member_metas) / n
 
-    uas = Counter(
-        re.split(r"[/\s(]", m["ua"])[0]
-        for m in member_metas
-        if m["ua"]
-    )
+    uas = Counter(re.split(r"[/\s(]", m["ua"])[0] for m in member_metas if m["ua"])
     for m in member_metas:
         ua_l = m["ua"].lower()
         if "zgrab" in ua_l:
@@ -611,10 +645,6 @@ def run_unsupervised_clustering(
     host_burst_map: dict[str, int] | None = None,
     n_clusters_override: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """
-    教師なしクラスタリング（TF-IDF + 数値特徴 + MiniBatchKMeans）を実行し、
-    各レコードのクラスタ割り当てと、クラスタ集計サマリーを返す。
-    """
     if not records:
         return [], []
 
@@ -675,7 +705,6 @@ def run_unsupervised_clustering(
     )
     try:
         sparse_mat = vectorizer.fit_transform(texts)
-        # spmatrix に直接 .todense() / .toarray() を呼ばず、汎用的な変換を行う
         X_txt = np.asarray(sparse_mat.toarray(), dtype=np.float64) * 1.4  # type: ignore[union-attr,attr-defined]
     except ValueError:
         X_txt = np.zeros((n_samples, 1), dtype=np.float64)
@@ -771,33 +800,52 @@ def classify_and_score(
     confidence = round(float(probs[best_idx]) * 100.0, 1)
 
     lower_sig = signal_text.lower()
-    if any(
+    is_tls_hello = "\x16\x03" in raw_request_line or "\\u0016\\u0003" in raw_request_line
+    is_scanner_ua = any(tok in user_agent.lower() for tok in ("zgrab", "masscan", "nuclei", "xpanse"))
+
+    has_rce_signal = any(
         k in lower_sig
         for k in (
             "formsyscmd",
-            "nc ",
-            "|sh",
-            "| sh",
-            "wget ",
-            "curl ",
-            "busybox",
-            "/etc/passwd",
+            "next-action",
             "process.mainmodule",
             "child_process",
             "spawn(",
+            "|sh",
+            "| sh",
+            "nc ",
             "/bin/sh",
             "/bin/bash",
+            "cmd.exe",
+            "powershell",
         )
-    ):
+    )
+    has_sqli_signal = any(
+        k in lower_sig
+        for k in (
+            "union select",
+            "or 1=1",
+            "' or '1'='1",
+            "sleep(",
+            "benchmark(",
+            "waitfor delay",
+            "information_schema",
+        )
+    )
+
+    if has_rce_signal:
         category = "RCE / Command Injection"
         confidence = max(confidence, 88.0)
+    elif has_sqli_signal:
+        category = "SQLi / XSS Probe"
+        confidence = max(confidence, 82.0)
     elif any(k in lower_sig for k in (".env", ".git", "credentials", "id_rsa", "actuator")):
         if category == "Automated Recon / Scanner":
             category = "Credential / Env Theft"
             confidence = max(confidence, 82.0)
-    elif event_type == "bad_request" or "xpanse" in lower_sig or "mgldd" in lower_sig:
-        if category == "Credential / Env Theft":
-            category = "Automated Recon / Scanner"
+    elif is_tls_hello or is_scanner_ua or event_type == "bad_request" or "mgldd" in lower_sig:
+        category = "Automated Recon / Scanner"
+        confidence = max(confidence, 75.0)
 
     special_chars = len(re.findall(r"['\";|<>$`\\{}\[\]\.\./]", f"{path} {payload} {raw_request_line}"[:4096]))
     features = np.array(
@@ -806,8 +854,13 @@ def classify_and_score(
     )
     raw_score = float(detector.decision_function(features)[0])
     anomaly_pct = int(np.clip((0.35 - raw_score) * 140.0, 5, 99))
-    if event_type == "bad_request" or category == "RCE / Command Injection":
-        anomaly_pct = max(anomaly_pct, 78)
+
+    if category == "RCE / Command Injection":
+        anomaly_pct = max(anomaly_pct, 82)
+    elif category == "SQLi / XSS Probe" or category == "Credential / Env Theft":
+        anomaly_pct = max(anomaly_pct, 68)
+    elif category == "Automated Recon / Scanner":
+        anomaly_pct = min(anomaly_pct, 55)
 
     return category, confidence, anomaly_pct
 
@@ -817,7 +870,7 @@ def _is_anomalous_event(category: str, anomaly_score: int, event_type: str = "")
     cat_norm = (category or "").strip()
     if HIDE_AUTOMATED_RECON and cat_norm == "Automated Recon / Scanner":
         return False
-    if cat_norm == "RCE / Command Injection" or (event_type or "").strip().lower() == "bad_request":
+    if cat_norm in {"RCE / Command Injection", "SQLi / XSS Probe", "Credential / Env Theft"}:
         return True
     return anomaly_score >= ANOMALY_SCORE_THRESHOLD
 
@@ -1051,6 +1104,9 @@ def _should_skip_record(
     path: str,
     raw_text: str,
 ) -> bool:
+    if _is_audit_or_admin_log(src_ip, raw_text, user_agent):
+        return True
+
     if SHOW_ALL_JSON and not any(
         [SKIP_PRIVATE_IPS, SKIP_SYSTEM_NOISE, SKIP_CRAWLERS, SKIP_GOOGLE_LLC, IGNORED_IPS, IGNORED_PREFIXES]
     ):
@@ -1200,8 +1256,13 @@ def _build_record_from_dict_and_meta(
     if _should_skip_record(src_ip, event_type, ua, path, raw_text_for_filter):
         return None
 
+    insert_id = ""
+    if isinstance(envelope_dict, dict):
+        insert_id = str(envelope_dict.get("insert_id") or envelope_dict.get("insertId") or "").strip()
+
     return {
         "timestamp": ts_dt.isoformat(),
+        "insert_id": insert_id,
         "source": source_name,
         "event_type": event_type,
         "ip": src_ip,
@@ -1245,6 +1306,11 @@ def _obj_to_record(
         if ts_dt < cutoff_dt:
             return None
 
+        envelope_meta: dict[str, Any] = {}
+        for k in ("insertId", "insert_id", "logName", "log_name", "severity", "labels"):
+            if k in obj:
+                envelope_meta[k] = obj[k]
+
         return _build_record_from_dict_and_meta(
             target_dict=target_dict,
             http_req=http_req,
@@ -1252,7 +1318,7 @@ def _obj_to_record(
             fallback_ip=_extract_ip_from_dict(obj, http_req),
             fallback_event=str(obj.get("event") or obj.get("methodName") or "request").lower(),
             source_name=source_name,
-            envelope_dict=obj if target_dict is not obj else None,
+            envelope_dict=envelope_meta or (obj if target_dict is not obj else None),
         )
 
     if isinstance(obj, str) and obj.strip() and blob_updated >= cutoff_dt:
@@ -1263,6 +1329,7 @@ def _obj_to_record(
         raw_obj = {"event": "text", "message": line, "timestamp": blob_updated.isoformat()}
         return {
             "timestamp": blob_updated.isoformat(),
+            "insert_id": "",
             "source": source_name,
             "event_type": "text",
             "ip": src_ip,
@@ -1374,7 +1441,13 @@ def _fetch_cloud_logging_entries_sync(cutoff_dt: datetime, limit: int) -> list[d
 
     cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     time_filter = f'timestamp >= "{cutoff_iso}"'
-    full_filter = f"{time_filter} AND ({LOG_FILTER})" if LOG_FILTER else time_filter
+    audit_exclusion = (
+        ' AND logName !~ "cloudaudit.googleapis.com"'
+        if EXCLUDE_AUDIT_AND_ADMIN_LOGS
+        else ""
+    )
+    base_filter = f"{time_filter}{audit_exclusion}"
+    full_filter = f"{base_filter} AND ({LOG_FILTER})" if LOG_FILTER else base_filter
 
     records: list[dict[str, Any]] = []
     per_project_limit = max(1, (limit + len(LOG_PROJECTS) - 1) // len(LOG_PROJECTS))
@@ -1524,6 +1597,14 @@ LIMIT {safe_limit}
     return records[:limit]
 
 
+def _record_dedup_key(rec: dict[str, Any]) -> str:
+    insert_id = str(rec.get("insert_id") or "").strip()
+    if insert_id:
+        return f"iid:{insert_id}"
+    payload_digest = hashlib.sha256(str(rec.get("payload") or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"ts:{rec.get('timestamp')}|ip:{rec.get('ip')}|m:{rec.get('method')}|p:{rec.get('path')}|h:{payload_digest}"
+
+
 def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     now_dt = datetime.now(timezone.utc)
@@ -1538,12 +1619,8 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
         combined.extend(_fetch_bigquery_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
 
     deduped: dict[str, dict[str, Any]] = {}
-    for idx, rec in enumerate(combined):
-        key = (
-            f"{rec['timestamp']}|{rec['source']}|{rec['ip']}|{rec['method']}|{rec['path']}|{idx}"
-            if SHOW_ALL_JSON
-            else f"{rec['timestamp']}|{rec['ip']}|{rec['method']}|{rec['path']}|{rec['payload'][:120]}"
-        )
+    for rec in combined:
+        key = _record_dedup_key(rec)
         deduped.setdefault(key, rec)
 
     return sorted(deduped.values(), key=lambda r: r["timestamp"], reverse=True)[:effective_limit]
@@ -1602,6 +1679,9 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         SKIP_GOOGLE_LLC,
         SKIP_PRIVATE_IPS,
         SKIP_SYSTEM_NOISE,
+        EXCLUDE_AUDIT_AND_ADMIN_LOGS,
+        tuple(sorted(ADMIN_IPS)),
+        tuple(sorted(ADMIN_EMAILS)),
         UNSUPERVISED_CLUSTERS,
         MAX_UNSUPERVISED_CLUSTERS,
         HIDE_AUTOMATED_RECON,
@@ -1625,6 +1705,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         ip = rec["ip"]
         geo = _normalize_geo_entry(geo_map.get(ip), ip=ip)
 
+        if _is_audit_or_admin_log(ip, rec.get("payload", ""), rec.get("user_agent", "")):
+            continue
         if SKIP_PRIVATE_IPS and _is_private_or_non_public_ip(ip, geo):
             continue
         if SKIP_GOOGLE_LLC and _is_google_llc(geo, rec.get("user_agent", ""), rec.get("payload", "")):
@@ -1787,6 +1869,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "show_all_json": SHOW_ALL_JSON,
         "only_anomalous": True,
         "hide_automated_recon": HIDE_AUTOMATED_RECON,
+        "exclude_audit_and_admin_logs": EXCLUDE_AUDIT_AND_ADMIN_LOGS,
         "summary": {
             "total_attacks": len(timeline_events),
             "unique_ips": len(ip_counts),
