@@ -23,7 +23,7 @@
     .arch-svg {
       display: block;
       width: 100%;
-      min-width: 720px;
+      min-width: 780px;
       height: auto;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
     }
@@ -32,6 +32,22 @@
       font-size: 0.85rem;
       color: #94a3b8;
       text-align: right;
+    }
+    .roadmap-list {
+      margin: 0.75rem 0 0;
+      padding-left: 1.25rem;
+    }
+    .roadmap-list li {
+      margin-bottom: 0.7rem;
+      line-height: 1.65;
+    }
+    .doc-note {
+      margin-top: 0.85rem;
+      padding: 0.75rem 1rem;
+      border-left: 3px solid #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.92rem;
     }
   </style>
 </head>
@@ -59,34 +75,34 @@
       <section class="card">
         <div class="card-header">
           <h2>1. システムの目的と全体概要</h2>
-          <span class="badge badge-info">Cloud Isolated Honeypot</span>
+          <span class="badge badge-info">Stateful Decoy &amp; AI Telemetry</span>
         </div>
         <p class="doc-lead">
-          本システムは、インターネット上の自動スキャンや不正アクセス試行を安全に観測・記録し、送信元情報やリクエスト内容を構造化ログとして収集・可視化するためのクラウド隔離型ハニーポット基盤です。
+          本システムは、世界中のサイバー攻撃を安全なクラウド隔離型ハニーポットに誘い込み、攻撃者の手口やマルウェア配布URL（C2インフラ）を自動採取し、AI/MLでリアルタイムに可視化する脅威インテリジェンス基盤です。
         </p>
         <p class="doc-body">
-          プロジェクト <code>honeypot-515503</code> 上の仮想マシン <code>hp-vm-us-01</code>（外部IP: <code>34.170.152.225</code>）にて、リバースプロキシの <code>hp-nginx</code>（8080番ポート公開）とハニーポット本体の <code>honeypot</code> を内部ネットワーク <code>hp-internal</code> 上で連携稼働させています。アクセスは非特権ユーザー <code>hpuser</code> で実行される <code>honeypot</code> へ渡され、Egress 制限や IAP 経由 SSH、Cloud Logging 連携を組み合わせることで、外部への踏み台化を抑止しつつ観測ログを安全に記録します。
+          単なる静的ログ記録にとどまらず、攻撃ボットの生存確認やフレームワーク特有の応答をメモリ上で動的にエミュレートする「ステートフル高対話風ハニーポット（<code>honeypot.py</code>）」と、その構造化ログを解析・可視化する「AI異常検知ダッシュボード（Honeypot-Log）」が連携します。プロジェクト <code>honeypot-515503</code> 上の仮想マシン <code>hp-vm-us-01</code>（ゾーン: <code>us-central1-a</code> / Container-Optimized OS）では、<code>hp-allow-honeypot-8080</code> による80個の罠ポート受付と、多層隔離・外向き通信遮断・GitHub/Cloud Build連携による安全な自動更新を組み合わせ、外部への踏み台化を抑止しながら高精度な観測データを収集します。
         </p>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>2. システム全体の4層アーキテクチャ</h2>
-          <span class="badge badge-success">hp-vpc / hpuser / IAP</span>
+          <h2>2. 最新5ブロック構成アーキテクチャとCI/CD連携</h2>
+          <span class="badge badge-success">80 Ports / Read-Only / CI/CD</span>
         </div>
 
-        <!-- インライン SVG 図解（日本語） -->
+        <!-- インライン SVG 図解（日本語・5ブロック＋CI/CD構成） -->
         <div class="arch-diagram-wrap">
           <svg
             class="arch-svg"
-            viewBox="0 0 920 500"
+            viewBox="0 0 980 560"
             role="img"
             aria-labelledby="svg-title-ja svg-desc-ja"
             xmlns="http://www.w3.org/2000/svg"
           >
-            <title id="svg-title-ja">システム全体の4層アーキテクチャ図</title>
+            <title id="svg-title-ja">最新5ブロック構成アーキテクチャ図（80罠ポート・多層隔離・AI/ML・CI/CD）</title>
             <desc id="svg-desc-ja">
-              外部からのアクセスが hp-vm-us-01 の hp-nginx と hpuser 実行の honeypot に到達し、hp-vpc の Egress 制限と IAP SSH 制御のもとで Cloud Logging へ集約・分析・可視化される構成図。
+              外部からの80罠ポート通信が hp-vm-us-01 の多層隔離コンテナへ到達し、Cloud Logging や Cloud Storage へ集約された後、AI/ML分析とSSEでダッシュボードへ配信される構成図。右上のGitHubからCloud Build・Artifact Registryを経由する自動デプロイ経路も示す。
             </desc>
             <defs>
               <marker id="arrow-cyan-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -101,247 +117,317 @@
               <marker id="arrow-amber-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
               </marker>
+              <marker id="arrow-purple-ja" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc" />
+              </marker>
             </defs>
 
-            <rect x="0" y="0" width="920" height="500" rx="10" fill="#0f172a" />
+            <rect x="0" y="0" width="980" height="560" rx="10" fill="#0f172a" />
 
-            <!-- 左側：外部アクセス / スキャナー -->
-            <rect x="20" y="55" width="175" height="125" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.5" />
-            <text x="107" y="82" fill="#f87171" font-size="13" font-weight="700" text-anchor="middle">外部インターネット</text>
-            <text x="107" y="102" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">自動スキャン / 外部アクセス</text>
-            <text x="107" y="124" fill="#94a3b8" font-size="11" text-anchor="middle">34.170.152.225:8080</text>
-            <text x="107" y="142" fill="#94a3b8" font-size="11" text-anchor="middle">HTTPリクエスト・ペイロード</text>
-            <text x="107" y="162" fill="#fca5a5" font-size="10.5" text-anchor="middle">送信元IP・ヘッダ・パス記録</text>
+            <!-- ブロック1：攻撃の誘致（外部インターネット / 80罠ポート） -->
+            <rect x="18" y="34" width="186" height="176" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.6" />
+            <text x="111" y="58" fill="#f87171" font-size="12.5" font-weight="700" text-anchor="middle">① 攻撃の誘致（80ポート）</text>
+            <text x="111" y="78" fill="#e2e8f0" font-size="11.5" font-weight="600" text-anchor="middle">外部スキャナー・ボット網</text>
+            <text x="111" y="99" fill="#cbd5e1" font-size="10.5" text-anchor="middle">Web/Proxy: 80, 443, 8080, 3128</text>
+            <text x="111" y="117" fill="#cbd5e1" font-size="10.5" text-anchor="middle">Dev/管理: 3000, 5000, 8069, 9200</text>
+            <text x="111" y="135" fill="#cbd5e1" font-size="10.5" text-anchor="middle">DB/Cache: 3306, 5432, 6379, 27017</text>
+            <text x="111" y="153" fill="#cbd5e1" font-size="10.5" text-anchor="middle">IoT/カメラ: 554, 7547, 8291, 37777</text>
+            <text x="111" y="177" fill="#fca5a5" font-size="10.5" text-anchor="middle">FW: hp-allow-honeypot-8080</text>
+            <text x="111" y="194" fill="#94a3b8" font-size="10" text-anchor="middle">SSH(22)はIAP経由のみ許可</text>
+
+            <!-- ブロック2：多層隔離（hp-vm-us-01 / honeypot / iptables） -->
+            <rect x="242" y="34" width="334" height="218" rx="10" fill="#172554" stroke="#34d399" stroke-width="1.8" />
+            <text x="409" y="56" fill="#6ee7b7" font-size="12.5" font-weight="700" text-anchor="middle">② 多層隔離（hp-vm-us-01 / hp-vpc）</text>
+            <text x="409" y="74" fill="#bfdbfe" font-size="10.8" text-anchor="middle">Container-Optimized OS (us-central1-a) / 非特権 hpuser</text>
+
+            <rect x="256" y="84" width="306" height="156" rx="8" fill="#0f172a" stroke="#4ade80" stroke-width="1.3" stroke-dasharray="4 3" />
+            <text x="409" y="103" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">honeypot.py（多ポート→:8080 マッピング＆動的デコイ）</text>
+            <text x="409" y="121" fill="#a7f3d0" font-size="10.3" text-anchor="middle">--read-only（書込禁止）/ --cap-drop=ALL（特権剥奪）</text>
+            <text x="409" y="138" fill="#a7f3d0" font-size="10.3" text-anchor="middle">メモリ制限 256MB / pids-limit=128 / 内部 hp-internal</text>
+            <text x="409" y="156" fill="#fde68a" font-size="10.3" text-anchor="middle">iptables: 169.254.169.254 SSRF遮断 ＆ 外向き通信遮断</text>
+            <text x="409" y="173" fill="#fde68a" font-size="10.3" text-anchor="middle">VPC: hp-deny-all-egress / PGA (199.36.153.8/30)</text>
+            <text x="409" y="191" fill="#93c5fd" font-size="10.3" text-anchor="middle">Base64/Hex自動復号・IOC(URL/IP)抽出・tcpdump録画</text>
+            <text x="409" y="226" fill="#86efac" font-size="10" text-anchor="middle">※VM起動時刻・startup.sh反映状況により稼働ポート数を確認</text>
+
+            <!-- ブロック3：ログ集約・保全（Cloud Logging / GCS） -->
+            <rect x="614" y="34" width="348" height="122" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.7" />
+            <text x="788" y="56" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">③ ログ集約・保全（Logging &amp; GCS）</text>
+            <text x="788" y="76" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">Cloud Logging (gcplogs) ＋ Cloud Storage</text>
+            <text x="788" y="96" fill="#e2e8f0" font-size="10.5" text-anchor="middle">構造化JSONログ・復号ペイロード・抽出URLを収集</text>
+            <text x="788" y="114" fill="#cbd5e1" font-size="10.5" text-anchor="middle">パケット録画(.pcap)保管: gs://honeypot-archive-515503</text>
+            <text x="788" y="136" fill="#fcd34d" font-size="10.3" text-anchor="middle">運用IAM: roles/viewer ＋ roles/logging.viewer（閲覧専用）</text>
+
+            <!-- ブロック5（右上）：CI/CD 自動デプロイパイプライン -->
+            <rect x="614" y="174" width="348" height="114" rx="10" fill="#1e1b4b" stroke="#c084fc" stroke-width="1.7" />
+            <text x="788" y="195" fill="#d8b4fe" font-size="12" font-weight="700" text-anchor="middle">⑤ CI/CD 自動デプロイ（SSH不要・最小権限）</text>
+            <text x="788" y="215" fill="#e9d5ff" font-size="10.5" text-anchor="middle">Mac (git push) → GitHub (jun172/honeypot)</text>
+            <text x="788" y="233" fill="#e9d5ff" font-size="10.5" text-anchor="middle">→ Cloud Build → Artifact Registry (asia-northeast1)</text>
+            <text x="788" y="251" fill="#e9d5ff" font-size="10.5" text-anchor="middle">→ VMメタデータ更新 ＆ インスタンス再起動・反映</text>
+            <text x="788" y="271" fill="#c4b5fd" font-size="10" text-anchor="middle"> honeypot-http / hp-nginx イメージを自動更新</text>
+
+            <!-- ブロック4：AI/ML可視化 ＋ ダッシュボード -->
+            <rect x="242" y="314" width="720" height="216" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
+            <text x="602" y="338" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">④ AI/ML 可視化 ＋ リアルタイムダッシュボード（Honeypot-Log）</text>
+            <text x="602" y="357" fill="#bbf7d0" font-size="10.8" text-anchor="middle">IsolationForest 異常検知・攻撃クラスタ分類・HTTPフィンガープリント → SSE で3秒ごとに配信</text>
+
+            <rect x="262" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="368" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">AI/ML 分析エンジン</text>
+            <text x="368" y="413" fill="#94a3b8" font-size="10.3" text-anchor="middle">IsolationForest 異常度スコア算出</text>
+            <text x="368" y="431" fill="#94a3b8" font-size="10.3" text-anchor="middle">攻撃手法・ペイロードクラスタ分類</text>
+            <text x="368" y="449" fill="#94a3b8" font-size="10.3" text-anchor="middle">IOC（URL / IP / 復号文字列）抽出</text>
+            <text x="368" y="469" fill="#86efac" font-size="10" text-anchor="middle">未知・高異常度スキャンを優先提示</text>
+
+            <rect x="496" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="602" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">SSE リアルタイム配信＆整形</text>
+            <text x="602" y="413" fill="#94a3b8" font-size="10.3" text-anchor="middle">Server-Sent Events で3秒ごと更新</text>
+            <text x="602" y="431" fill="#94a3b8" font-size="10.3" text-anchor="middle">CSP / エスケープ / 文字数制限</text>
+            <text x="602" y="449" fill="#94a3b8" font-size="10.3" text-anchor="middle">ポート・手法・発信元IP集計</text>
+            <text x="602" y="469" fill="#7dd3fc" font-size="10" text-anchor="middle">低遅延な脅威インテリジェンス表示</text>
+
+            <rect x="730" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="836" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">UI・構成ドキュメント</text>
+            <text x="836" y="413" fill="#94a3b8" font-size="10.3" text-anchor="middle">リアルタイム攻撃監視ダッシュボード</text>
+            <text x="836" y="431" fill="#94a3b8" font-size="10.3" text-anchor="middle">システム構成・開発環境ページ</text>
+            <text x="836" y="449" fill="#94a3b8" font-size="10.3" text-anchor="middle">日本語 / English 言語切替</text>
+            <text x="836" y="469" fill="#fde68a" font-size="10" text-anchor="middle">ポートフォリオ・技術解説にも対応</text>
 
             <!-- 左下：閲覧・運用 -->
-            <rect x="20" y="335" width="175" height="110" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
-            <text x="107" y="362" fill="#38bdf8" font-size="13" font-weight="700" text-anchor="middle">閲覧・運用アクセス</text>
-            <text x="107" y="384" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">ブラウザ / gcloud / IAP</text>
-            <text x="107" y="406" fill="#94a3b8" font-size="11" text-anchor="middle">roles/viewer + IAP Tunnel</text>
-            <text x="107" y="424" fill="#94a3b8" font-size="11" text-anchor="middle">ログ参照・可視化確認</text>
-
-            <!-- ① おとり観測層（honeypot-515503） -->
-            <rect x="245" y="25" width="320" height="175" rx="10" fill="#172554" stroke="#60a5fa" stroke-width="1.8" />
-            <text x="405" y="48" fill="#93c5fd" font-size="12.5" font-weight="700" text-anchor="middle">① おとり観測層（honeypot-515503）</text>
-            <text x="405" y="66" fill="#bfdbfe" font-size="11" text-anchor="middle">VM: hp-vm-us-01 (34.170.152.225)</text>
-
-            <!-- ② ネットワーク・コンテナ隔離層（hp-vpc） -->
-            <rect x="260" y="78" width="290" height="108" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5 3" />
-            <text x="405" y="97" fill="#6ee7b7" font-size="11.5" font-weight="700" text-anchor="middle">② ネットワーク・隔離層（hp-vpc / hp-internal）</text>
-            <text x="405" y="115" fill="#e2e8f0" font-size="11" text-anchor="middle">hp-nginx (:8080) ＋ honeypot (非特権 hpuser)</text>
-            <text x="405" y="133" fill="#a7f3d0" font-size="10.5" text-anchor="middle">Egress Deny / PGA (199.36.153.8/30)</text>
-            <text x="405" y="149" fill="#a7f3d0" font-size="10.5" text-anchor="middle">SSH は IAP (35.235.240.0/20) 経由のみ</text>
-            <text x="405" y="166" fill="#fca5a5" font-size="10.5" text-anchor="middle">外部への不正な外向き通信を遮断</text>
-
-            <!-- ③ ログ収集・保全層（Cloud Logging） -->
-            <rect x="625" y="45" width="275" height="155" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8" />
-            <text x="762" y="70" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">③ ログ収集・保全層</text>
-            <text x="762" y="88" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">Cloud Logging / コンテナログ</text>
-            <text x="762" y="112" fill="#e2e8f0" font-size="11" text-anchor="middle">hp-nginx / honeypot 出力・イベント記録</text>
-            <text x="762" y="132" fill="#e2e8f0" font-size="11" text-anchor="middle">プロジェクト honeypot-515503 で集約</text>
-            <text x="762" y="156" fill="#fcd34d" font-size="10.5" text-anchor="middle">運用者は roles/viewer で参照中心</text>
-            <text x="762" y="174" fill="#94a3b8" font-size="10.5" text-anchor="middle">監査・検証用の観測証跡を保持</text>
-
-            <!-- ④ 分析・可視化・アクセス制御層 -->
-            <rect x="245" y="295" width="655" height="165" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
-            <text x="572" y="320" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">④ 分析・可視化・アクセス制御層（Cloud Logging / Dashboard / IAM）</text>
-            <text x="572" y="340" fill="#bbf7d0" font-size="11" text-anchor="middle">最小権限IAM（roles/viewer ＋ roles/iap.tunnelResourceAccessor）</text>
-
-            <rect x="268" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="360" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">ログ抽出・分類</text>
-            <text x="360" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">Cloud Logging 照会</text>
-            <text x="360" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">スキャン・リクエスト解析</text>
-
-            <rect x="478" y="356" width="190" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="573" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">整形・安全化</text>
-            <text x="573" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">エスケープ・文字数制限</text>
-            <text x="573" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">送信元・ステータス集計</text>
-
-            <rect x="693" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="785" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">画面・構成ドキュメント</text>
-            <text x="785" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">ダッシュボード / 構成画面</text>
-            <text x="785" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">日本語 / English 切替</text>
+            <rect x="18" y="372" width="186" height="136" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.6" />
+            <text x="111" y="396" fill="#38bdf8" font-size="12.5" font-weight="700" text-anchor="middle">閲覧・運用アクセス</text>
+            <text x="111" y="416" fill="#e2e8f0" font-size="11" font-weight="600" text-anchor="middle">ブラウザ / gcloud / IAP</text>
+            <text x="111" y="438" fill="#94a3b8" font-size="10.3" text-anchor="middle">IAM: roles/viewer</text>
+            <text x="111" y="455" fill="#94a3b8" font-size="10.3" text-anchor="middle">＋ roles/logging.viewer</text>
+            <text x="111" y="476" fill="#7dd3fc" font-size="10" text-anchor="middle">完全読み取り専用で安全に監視</text>
 
             <!-- 矢印 -->
-            <line x1="195" y1="115" x2="256" y2="115" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-ja)" />
-            <text x="225" y="106" fill="#fca5a5" font-size="10" font-weight="600" text-anchor="middle">:8080 通信</text>
+            <line x1="204" y1="122" x2="238" y2="122" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-ja)" />
+            <text x="221" y="112" fill="#fca5a5" font-size="9.5" font-weight="600" text-anchor="middle">80ポート</text>
 
-            <line x1="565" y1="118" x2="621" y2="118" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-ja)" />
-            <text x="593" y="108" fill="#fde68a" font-size="9.8" font-weight="600" text-anchor="middle">ログ出力</text>
+            <line x1="576" y1="96" x2="610" y2="96" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-ja)" />
+            <text x="593" y="86" fill="#fde68a" font-size="9.5" font-weight="600" text-anchor="middle">ログ送信</text>
 
-            <path d="M 762 200 L 762 248 L 572 248 L 572 291" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-ja)" />
-            <text x="667" y="240" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">Cloud Logging 参照・分析</text>
+            <line x1="614" y1="226" x2="580" y2="226" stroke="#c084fc" stroke-width="2" marker-end="url(#arrow-purple-ja)" />
+            <text x="597" y="216" fill="#e9d5ff" font-size="9" font-weight="600" text-anchor="middle">CI/CD更新</text>
 
-            <line x1="245" y1="390" x2="199" y2="390" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-ja)" />
-            <text x="222" y="380" fill="#86efac" font-size="10" font-weight="600" text-anchor="middle">確認・閲覧</text>
+            <path d="M 788 156 L 788 310" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-ja)" />
+            <text x="844" y="302" fill="#7dd3fc" font-size="10" font-weight="600" text-anchor="middle">ログ分析・配信</text>
+
+            <line x1="242" y1="438" x2="208" y2="438" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-ja)" />
+            <text x="225" y="428" fill="#86efac" font-size="9.5" font-weight="600" text-anchor="middle">UI閲覧</text>
           </svg>
-          <div class="arch-diagram-caption">図1：honeypot-515503 / hp-vm-us-01 中心の観測・隔離・Cloud Logging 構成図</div>
+          <div class="arch-diagram-caption">図1：最新5ブロック構成（80罠ポート誘致・多層隔離・ログ集約・AI/ML可視化・CI/CD自動デプロイ）</div>
         </div>
 
         <div class="arch-grid">
           <div class="arch-box">
-            <h3>① おとり観測層（プロジェクト：<code>honeypot-515503</code> / VM：<code>hp-vm-us-01</code>）</h3>
+            <h3>① 攻撃の誘致層（80個の罠ポート構成）</h3>
             <p>
-              Compute Engine インスタンス <code>hp-vm-us-01</code>（外部IP: <code>34.170.152.225</code>）上で、リバースプロキシの <code>hp-nginx</code> とハニーポット本体の <code>honeypot</code> コンテナを稼働させています。外部からの <code>8080</code> 番ポートへのアクセスを <code>hp-nginx</code> が受け付け、Docker 内部ネットワーク <code>hp-internal</code> 経由で <code>honeypot</code> へ転送します。
+              ファイアウォールルール <code>hp-allow-honeypot-8080</code> により80個のポートをVM（<code>hp-vm-us-01</code>）へ誘導します。標準・代替HTTP/Proxy（43ポート：<code>80</code>, <code>443</code>, <code>8080</code>, <code>3128</code> 等）、開発フレームワーク・管理パネル（21ポート：<code>3000</code>, <code>5000</code>, <code>8069</code>, <code>9200</code> 等）、DB・キャッシュ（7ポート：<code>3306</code>, <code>5432</code>, <code>6379</code>, <code>27017</code> 等）、IoT・ルーター・カメラ（9ポート：<code>554</code>, <code>7547</code>, <code>8291</code>, <code>37777</code> 等）をカバーし、管理用SSH（<code>22</code>番）はGoogleのIAPサーバー（<code>35.235.240.0/20</code>）のみへ限定します。
             </p>
           </div>
           <div class="arch-box">
-            <h3>② ネットワーク・非特権実行による隔離層（VPC：<code>hp-vpc</code> / ユーザー：<code>hpuser</code>）</h3>
+            <h3>② 多層隔離層（<code>--read-only</code> / <code>iptables</code> / <code>hpuser</code>）</h3>
             <ul>
-              <li><strong>コンテナの非特権ユーザー実行（<code>hpuser</code>）:</strong> ハニーポットプロセスは特権 <code>root</code> ではなく <code>hpuser</code> として動作し、コンテナ内部で万が一処理が逸脱した場合でもホストや権限昇格のリスクを抑えます。</li>
-              <li><strong>ネットワーク分離と公開ポート制御:</strong> <code>hp-vpc</code>（サブネット <code>hp-subnet-us</code>）および Docker ネットワーク <code>hp-internal</code> によって内部通信を分離しつつ、公開用ルール <code>hp-allow-honeypot-8080</code> で <code>8080</code> 番ポートを公開しています。</li>
-              <li><strong>Egress 制限:</strong> <code>hp-allow-pga-egress</code>（<code>199.36.153.8/30</code> 宛て TCP 443）と <code>hp-deny-all-egress</code>（外向き通信拒否）により、VM から外部インターネットへの無制限な送信通信を制限しています。</li>
-              <li><strong>IAP 経由 SSH 制限:</strong> <code>hp-allow-iap-ssh</code> により SSH（TCP 22）は Identity-Aware Proxy（<code>35.235.240.0/20</code>）経由のみへ限定しています。</li>
+              <li><strong>コンテナ厳格隔離:</strong> ファイルシステム書き込み禁止（<code>--read-only</code>）、全Linuxケーパビリティ剥奪（<code>--cap-drop=ALL</code>）、非特権ユーザー <code>hpuser</code> 実行、メモリ256MB制限・<code>pids-limit=128</code>、内部ネットワーク <code>hp-internal</code> を組み合わせます。</li>
+              <li><strong>SSRF・外向き通信遮断:</strong> <code>iptables</code> によるGCPメタデータサーバー（<code>169.254.169.254</code>）へのSSRFブロックと外向き通信遮断に加え、VPCの <code>hp-deny-all-egress</code>（および PGA <code>199.36.153.8/30</code> TCP 443 制御）で外部踏み台化を防ぎます。</li>
+              <li><strong>動的エミュレーション＆パケット録画:</strong> <code>honeypot.py</code> が攻撃応答を動的に返し、Base64/Hex復号やIOC（URL・IP）抽出を行い、<code>tcpdump</code> 等で <code>.pcap</code> 録画を取得します。</li>
             </ul>
           </div>
           <div class="arch-box">
-            <h3>③ ログ収集・記録層（Cloud Logging ＆ コンテナログ）</h3>
+            <h3>③ ログ集約・保全層（Cloud Logging ＆ Cloud Storage）</h3>
             <p>
-              <code>hp-nginx</code> および <code>honeypot</code> が記録するリクエスト・アクセス・検知ログはコンテナログおよび Cloud Logging へ出力されます。公開後の外部アクセスやスキャン試行を後から追跡・分析できるよう、観測証跡を保持します。
+              コンテナが出力する構造化JSONログ（攻撃分類、復号ペイロード、抽出URLなど）は Cloud Logging（<code>gcplogs</code>）へリアルタイム集約され、録画したパケットデータ（<code>.pcap</code>）は Cloud Storage バケット（<code>gs://honeypot-archive-515503</code>）へ長期保管されます。
             </p>
           </div>
           <div class="arch-box">
-            <h3>④ アクセス制御・可視化層（IAM 最小権限 ＆ Web UI）</h3>
+            <h3>④ AI/ML 可視化 ＋ ⑤ CI/CD 自動デプロイ層</h3>
             <p>
-              運用アカウント（<code>mujwtaxz@gmail.com</code>）のプロジェクトロールは <code>roles/viewer</code>（および IAP 接続用の <code>roles/iap.tunnelResourceAccessor</code>）へ絞り込み、誤変更や不正削除を防いでいます。Web 画面ではダッシュボードと本構成ページ（日本語／英語切替）を提供します。
+              収集ログは <code>IsolationForest</code> による異常度スコア算出や攻撃クラスタ分類を経て、SSE（Server-Sent Events）で3秒ごとにダッシュボードへ配信されます。また、ローカルから <code>git push</code>（<code>jun172/honeypot</code>）すると Cloud Build が Docker イメージ（<code>honeypot-http</code> / <code>hp-nginx</code>）をビルドして Artifact Registry（<code>asia-northeast1-docker.pkg.dev</code>）へ格納し、VMメタデータ更新と再起動でSSH不要の自動更新を行います。
             </p>
+          </div>
+        </div>
+        <div class="doc-note">
+          <strong>ポート同期に関する運用メモ：</strong> ファイアウォール側（<code>hp-allow-honeypot-8080</code>）が80ポート開放状態であっても、VM（<code>hp-vm-us-01</code>）の起動時刻や <code>startup.sh</code> の反映状態によってはコンテナ側待ち受け数が旧構成（45ポート等）のままとなる場合があります。<code>startup.sh</code>（80ポート版）の <code>git push</code> とVM反映・再起動を行うことで、ファイアウォールとコンテナの待ち受けポート数を一致させることができます。
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>3. 対応できる攻撃・対象外の攻撃（設計上の割り切り）</h2>
+          <span class="badge badge-info">Threat Coverage</span>
+        </div>
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>得意な攻撃（HTTP/HTTPS・主要80ポート上のスキャン＆エクスプロイト）</h3>
+            <ul>
+              <li><strong>IoT・ルーター乗っ取り（Mirai系 / Mozi系）:</strong> 生存確認への動的応答やアーキテクチャ不一致（<code>Exec format error</code>）の擬似応答により、攻撃者が保持する複数CPUアーキテクチャ向けマルウェア配布URL（<code>http://&lt;IP&gt;/...</code>）を引き出します。</li>
+              <li><strong>最新Webフレームワーク RCE:</strong> Next.js Server Actions（<code>next-action</code>）、Laravel / PHPUnit（<code>eval-stdin.php</code> / <code>.env</code> 探索）、ThinkPHP、Spring Boot（<code>/actuator/env</code>）、Jenkins（<code>/script</code>）などの脆弱性プローブに対し、本物に近い偽応答を返して後続ペイロードを観測します。</li>
+              <li><strong>ヘッダ経由攻撃・Web/DBスキャン:</strong> Log4j（<code>${jndi:ldap://...}</code>）や Shellshock 等のヘッダ注入、SQLインジェクション、XSS、パストラバーサル（偽 <code>/etc/passwd</code>）、WordPress総当たり、オープンプロキシ探索を全ヘッダ走査とBase64/Hex自動復号で捉えます。</li>
+            </ul>
+          </div>
+          <div class="arch-box">
+            <h3>対象外の攻撃（安全な設計上の割り切り）</h3>
+            <ul>
+              <li><strong>非HTTP専用バイナリプロトコル:</strong> SSH（22番）そのものへのログイン対話や、SMB・RDP等の専用バイナリプロトコルハンドシェイクは対象外です（管理用SSHはIAP経由に限定し、一般公開は閉鎖）。</li>
+              <li><strong>実際のOS破壊や外部への踏み台攻撃:</strong> 攻撃コマンドの実行や外部ネットワークへの自由な送信を遮断しているため、本システムが踏み台となって他社へDDoSや外部攻撃を仕掛けることは構造的に抑止されています。</li>
+            </ul>
           </div>
         </div>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>3. 現在のシステムで使用しているGCPサービス一覧</h2>
-          <span class="badge badge-info">GCP Services</span>
+          <h2>4. 使用しているGCPサービスと関連ツール一覧</h2>
+          <span class="badge badge-info">GCP &amp; Tooling</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>カテゴリ</th>
-                <th>GCP サービス名</th>
-                <th>現在のシステムでの役割</th>
+                <th>区分</th>
+                <th>GCP サービス / 関連ツール</th>
+                <th>本システムでの役割</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>仮想マシン</strong></td>
-                <td>Compute Engine</td>
-                <td>ハニーポット基盤となる VM（<code>hp-vm-us-01</code> / 外部IP <code>34.170.152.225</code>）の稼働。</td>
+                <td><strong>ハニーポット本体</strong></td>
+                <td>Compute Engine (GCE)</td>
+                <td>ハニーポット稼働用VM（<code>hp-vm-us-01</code> / <code>us-central1-a</code> / Container-Optimized OS）。</td>
               </tr>
               <tr>
                 <td><strong>ネットワーク・FW</strong></td>
-                <td>Virtual Private Cloud (VPC)</td>
-                <td><code>hp-vpc</code>・<code>hp-subnet-us</code>、<code>hp-allow-honeypot-8080</code>、<code>hp-allow-iap-ssh</code>、Egress 制限ルールの運用。</td>
+                <td>VPC ネットワーク / Firewall</td>
+                <td>隔離専用ネットワーク <code>hp-vpc</code>、80ポート受付（<code>hp-allow-honeypot-8080</code>）、外向き遮断（<code>hp-deny-all-egress</code>）。</td>
               </tr>
               <tr>
-                <td><strong>安全管理接続</strong></td>
-                <td>Identity-Aware Proxy (IAP)</td>
-                <td><code>35.235.240.0/20</code> 経由の暗号化トンネルによる <code>hp-vm-us-01</code> への SSH 接続。</td>
+                <td><strong>CI/CD・ソース管理</strong></td>
+                <td>GitHub / Cloud Build</td>
+                <td><code>jun172/honeypot</code> への <code>git push</code> を検知し、イメージビルドとGCE更新・再起動を自動実行。</td>
               </tr>
               <tr>
-                <td><strong>ログ収集・参照</strong></td>
-                <td>Cloud Logging</td>
-                <td><code>hp-vm-us-01</code> およびコンテナから出力されるアクセス・動作ログの収集と確認。</td>
+                <td><strong>コンテナ倉庫</strong></td>
+                <td>Artifact Registry</td>
+                <td>ビルド済み Docker イメージ（<code>honeypot-http</code> / <code>hp-nginx</code>）の保管（<code>asia-northeast1-docker.pkg.dev</code>）。</td>
               </tr>
               <tr>
-                <td><strong>権限管理</strong></td>
-                <td>Identity and Access Management (IAM)</td>
-                <td><code>roles/viewer</code> および <code>roles/iap.tunnelResourceAccessor</code> による閲覧・接続権限の制御。</td>
+                <td><strong>ログ収集・保管</strong></td>
+                <td>Cloud Logging (<code>gcplogs</code>) / Cloud Storage</td>
+                <td>攻撃検知JSONログのリアルタイム収集と、<code>.pcap</code> パケットデータの長期保管（<code>gs://honeypot-archive-515503</code>）。</td>
               </tr>
               <tr>
-                <td><strong>イメージビルド・保管</strong></td>
-                <td>Cloud Build / Artifact Registry</td>
-                <td>ハニーポットコンテナイメージのビルドおよびレジストリからの <code>docker pull</code> 配信。</td>
+                <td><strong>権限・安全接続</strong></td>
+                <td>IAM / Identity-Aware Proxy (IAP)</td>
+                <td>閲覧専用権限（<code>roles/viewer</code> ＋ <code>roles/logging.viewer</code>）と、IAP（<code>35.235.240.0/20</code>）経由の安全なSSH接続。</td>
+              </tr>
+              <tr>
+                <td><strong>コンテナ内ソフト</strong></td>
+                <td>Python (<code>honeypot.py</code>) / Docker / <code>tcpdump</code> / netshoot / Google Cloud SDK</td>
+                <td>HTTP待受・攻撃分類・動的デコイ・IOC抽出、隔離実行、パケット録画とGCSアップロード。</td>
               </tr>
             </tbody>
           </table>
         </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>4. 開発・運用環境と構成要素</h2>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>カテゴリ</th>
-                <th>構成・ツール・要素</th>
-                <th>役割</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>開発端末・CLI</strong></td>
-                <td>macOS / zsh / Google Cloud CLI (<code>gcloud</code>) / Git</td>
-                <td>ソース管理・イメージビルド投入・VM状態および IAM/FW 確認</td>
-              </tr>
-              <tr>
-                <td><strong>VM・コンテナ基盤</strong></td>
-                <td><code>hp-vm-us-01</code> / Docker / <code>hp-internal</code></td>
-                <td><code>hp-nginx</code> と <code>honeypot</code> コンテナの稼働とネットワーク隔離</td>
-              </tr>
-              <tr>
-                <td><strong>ハニーポット実行</strong></td>
-                <td><code>honeypot</code> コンテナ / 非特権ユーザー <code>hpuser</code></td>
-                <td>8080番ポート配下での HTTP 応答生成とアクセス記録</td>
-              </tr>
-              <tr>
-                <td><strong>リバースプロキシ</strong></td>
-                <td><code>hp-nginx</code> コンテナ</td>
-                <td>外部 <code>:8080</code> からのリクエスト受付と <code>honeypot</code> へのプロキシ転送</td>
-              </tr>
-              <tr>
-                <td><strong>ログ・監視</strong></td>
-                <td>Cloud Logging / <code>docker logs</code></td>
-                <td>外部公開後のアクセスログ・コンテナ稼働ログの確認</td>
-              </tr>
-              <tr>
-                <td><strong>フロントエンド</strong></td>
-                <td>HTML5 / CSS3 / JavaScript</td>
-                <td>ダッシュボードおよび開発環境・構成ページの表示（日英切替対応）</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>5. 稼働・公開状態のポイント</h2>
-          <span class="badge badge-danger">Live Status</span>
-        </div>
-        <p class="doc-body">
-          <code>hp-vm-us-01</code>（<code>34.170.152.225</code>）上で <code>hp-nginx</code> と <code>honeypot</code>（<code>hpuser</code> 実行）が稼働し、<code>hp-allow-honeypot-8080</code> による外部公開状態のもとで HTTP 応答（<code>Portal Blog - Portal</code> 等）とログ記録を確認しています。あわせて SSH は IAP 経由に限定し、Egress 制限と IAM の <code>roles/viewer</code> 化によって運用上のリスクを抑えています。
+        <p class="doc-note">
+          ※IAM一覧に <code>roles/run.serviceAgent</code> や <code>roles/pubsub.serviceAgent</code>、<code>roles/container.serviceAgent</code> 等が表示される場合がありますが、これらはAPI有効化時にGoogle側が自動生成するシステム用アカウントであり、中核となる稼働基盤は上記の Compute Engine / Artifact Registry / Cloud Build / Cloud Logging / Cloud Storage です。
         </p>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>6. セキュリティと運用の安全設計</h2>
-          <span class="badge badge-success">Least Privilege &amp; Isolation</span>
+          <h2>5. 開発環境・技術スタックと自慢できるポイント</h2>
+          <span class="badge badge-success">Architecture Highlights</span>
         </div>
-        <div class="arch-grid">
-          <div class="arch-box">
-            <h3>非特権実行（<code>hpuser</code>）とネットワーク分離</h3>
-            <p>
-              <code>honeypot</code> コンテナを非特権ユーザー <code>hpuser</code> で動作させ、<code>hp-nginx</code> とは <code>hp-internal</code> ネットワーク経由で通信させることで、外部公開口とアプリケーション処理の境界を整理しています。
-            </p>
-          </div>
-          <div class="arch-box">
-            <h3>Egress 制限と IAP 経由 SSH</h3>
-            <p>
-              <code>hp-vpc</code> 上の Egress 制限ルール（<code>hp-allow-pga-egress</code> / <code>hp-deny-all-egress</code>）で外部への不要な送信を抑止しつつ、管理用 SSH は IAP（<code>35.235.240.0/20</code>）経由に限定しています。
-            </p>
-          </div>
-          <div class="arch-box">
-            <h3>IAM 最小権限と Cloud Logging 確認</h3>
-            <p>
-              運用アカウントの権限を <code>roles/viewer</code>（＋ <code>roles/iap.tunnelResourceAccessor</code>）に抑えることで、意図しないリソース変更や削除を防ぎつつ、Cloud Logging やコンテナログから公開後のアクセス状況を把握できます。
-            </p>
-          </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>領域</th>
+                <th>技術スタック・特徴</th>
+                <th>アピールポイント</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>バックエンド・デコイ</strong></td>
+                <td>ピュアPython（標準ライブラリ中心・外部依存最小化）</td>
+                <td>サプライチェーンリスクを抑えつつ、動的応答・Base64/Hex復号・IOC（URL/IP）抽出を軽量に実現。</td>
+              </tr>
+              <tr>
+                <td><strong>多層防御（隔離）</strong></td>
+                <td><code>--read-only</code> / <code>--cap-drop=ALL</code> / <code>hpuser</code> / <code>iptables</code> / VPC</td>
+                <td>非特権実行・書込禁止・メタデータSSRF遮断・外向き通信完全ブロックを組み合わせた堅牢な封じ込め。</td>
+              </tr>
+              <tr>
+                <td><strong>ゼロトラスト CI/CD</strong></td>
+                <td>GitHub ＋ Cloud Build ＋ Artifact Registry ＋ IAP</td>
+                <td>SSHポートを一般公開せず、最小権限運用と自動ビルド・デプロイパイプラインを両立。</td>
+              </tr>
+              <tr>
+                <td><strong>AI/ML 可視化</strong></td>
+                <td><code>IsolationForest</code> / クラスタ分類 / SSE（3秒更新） / 日英UI</td>
+                <td>異常度スコアリングとリアルタイム配信ダッシュボードにより、膨大なスキャンログから注目イベントを素早く把握。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>6. 今後の課題と拡張ロードマップ</h2>
+          <span class="badge badge-info">Roadmap: Phase 2 &amp; Phase 3</span>
+        </div>
+        <p class="doc-lead">
+          現在は「安全に攻撃を観測・可視化するフェーズ（Phase 1）」を達成しており、今後は検体自動保全（Phase 2）やプロトコル特化・AIサーバー狙いデコイへの拡張（Phase 3）へ発展させる計画です。
+        </p>
+
+        <h3>主な課題</h3>
+        <ul class="roadmap-list">
+          <li><strong>非HTTPバイナリプロトコルの対話不足：</strong> DB系（3306, 6379, 27017）や RTSP（554）等もHTTP待ち受けへ集約しているため、専用バイナリプロトコルを前提とするボットは途中で切断する場合があります。</li>
+          <li><strong>捕獲URLから検体取得・解析までの手作業：</strong> ログからマルウェア配布URLを抽出するまでは自動化済みですが、配布サーバーが消える前に検体（ELFやスクリプト）を自動取得し、REMnux（<code>floss</code> / Ghidra / YARA）へ渡す工程は改善余地があります。</li>
+          <li><strong>Webシェル設置後など高度なステートフル対話の深化：</strong> バックドア配置後の再アクセスや後続ステージの挙動をメモリ上でより深く擬似再現する拡張が考えられます。</li>
+          <li><strong>TLS/HTTPS（443 / 8443）通信への対応：</strong> 暗号化ハンドシェイクを最初から要求するスキャナーやツールからの通信も観測できる余地があります。</li>
+        </ul>
+
+        <h3>拡張ロードマップ（優先度順）</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>優先度</th>
+                <th>拡張テーマ</th>
+                <th>具体的な実装イメージと期待効果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>高 ①</strong></td>
+                <td>隔離クローラー＆サンドボックス自動連携</td>
+                <td>Cloud Logging で <code>captured_attacker_urls</code> を検知したら Pub/Sub 経由で隔離クローラーを起動し、検体を自動取得して Cloud Storage に保存。SHA-256算出や YARA 判定へ連携（脅威インテリジェンスの自動化）。</td>
+              </tr>
+              <tr>
+                <td><strong>高 ②</strong></td>
+                <td>脅威情報の自動ブロックリスト還元</td>
+                <td>検知した攻撃元IPやC2 URLを集計し、STIX/TAXII やファイアウォール・防御機器向けブロックリスト（IOCフィード）として活用する能動的防御（Active Defense）へ展開。</td>
+              </tr>
+              <tr>
+                <td><strong>中 ③</strong></td>
+                <td>プロトコル別・軽量デコイ追加（Redis / AI API）</td>
+                <td><code>6379</code>（Redis）の <code>CONFIG SET</code> 系プローブや、<code>11434</code> / <code>/v1/models</code> 等の偽Ollama/OpenAI互換応答を実装し、AIサーバー乗っ取り（LLMジャック）ボットの対話ログを採取。</td>
+              </tr>
+              <tr>
+                <td><strong>中 ④</strong></td>
+                <td>自己署名証明書による HTTPS（443/8443）対応</td>
+                <td>リバースプロキシまたは TLS 終端で証明書を適用し、HTTPS前提のスキャン・攻撃通信も復号して観測対象を拡大。</td>
+              </tr>
+              <tr>
+                <td><strong>低 ⑤</strong></td>
+                <td>LLMによる攻撃意図の自動要約レポート</td>
+                <td>Base64や難読化ペイロードをバックグラウンドでLLMへ渡し、「どの脆弱性を狙い、何を実行しようとしているか」を日本語・英語で自動解説。</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
     </div>
@@ -351,34 +437,34 @@
       <section class="card">
         <div class="card-header">
           <h2>1. Purpose &amp; System Overview</h2>
-          <span class="badge badge-info">Cloud Isolated Honeypot</span>
+          <span class="badge badge-info">Stateful Decoy &amp; AI Telemetry</span>
         </div>
         <p class="doc-lead">
-          This system is a cloud-isolated honeypot environment designed to observe and record external scans and HTTP access attempts while limiting outbound risk and preserving audit visibility via Cloud Logging.
+          This system is a cloud-isolated threat intelligence honeypot platform that lures external cyberattacks into a hardened environment, extracts attacker techniques and malware distribution URLs (C2 infrastructure), and visualizes activity in real time using AI/ML.
         </p>
         <p class="doc-body">
-          Running on Compute Engine instance <code>hp-vm-us-01</code> (external IP: <code>34.170.152.225</code>) in project <code>honeypot-515503</code>, the deployment pairs reverse proxy <code>hp-nginx</code> (exposed on port 8080) with honeypot container <code>honeypot</code> running as non-root user <code>hpuser</code> over internal network <code>hp-internal</code>. Outbound egress restrictions, IAP-only SSH, Cloud Logging, and least-privilege <code>roles/viewer</code> IAM access support safe observation.
+          Beyond passive request logging, it pairs a stateful high-interaction-style HTTP decoy (<code>honeypot.py</code>) that emulates bot liveness checks and framework responses in memory with a real-time AI anomaly detection dashboard (Honeypot-Log). Deployed on Compute Engine instance <code>hp-vm-us-01</code> (zone: <code>us-central1-a</code> / Container-Optimized OS) in project <code>honeypot-515503</code>, the platform combines 80-port firewall exposure (<code>hp-allow-honeypot-8080</code>), multi-layer container/network isolation, egress blocking, and GitHub/Cloud Build CI/CD to collect rich telemetry while preventing outbound pivot risk.
         </p>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>2. Four-Layer Architecture</h2>
-          <span class="badge badge-success">hp-vpc / hpuser / IAP</span>
+          <h2>2. Five-Block Architecture &amp; CI/CD Pipeline</h2>
+          <span class="badge badge-success">80 Ports / Read-Only / CI/CD</span>
         </div>
 
-        <!-- インライン SVG 図解（英語） -->
+        <!-- インライン SVG 図解（英語・5ブロック＋CI/CD構成） -->
         <div class="arch-diagram-wrap">
           <svg
             class="arch-svg"
-            viewBox="0 0 920 500"
+            viewBox="0 0 980 560"
             role="img"
             aria-labelledby="svg-title-en svg-desc-en"
             xmlns="http://www.w3.org/2000/svg"
           >
-            <title id="svg-title-en">Four-Layer System Architecture Diagram</title>
+            <title id="svg-title-en">Five-Block Architecture Diagram (80 Trap Ports, Multi-Layer Isolation, AI/ML, CI/CD)</title>
             <desc id="svg-desc-en">
-              Architecture diagram showing external traffic reaching hp-nginx and hpuser-run honeypot on hp-vm-us-01 under hp-vpc egress controls and IAP SSH, with logs inspected in Cloud Logging.
+              Architecture diagram showing external traffic across 80 ports reaching isolated containers on hp-vm-us-01, flowing into Cloud Logging and Cloud Storage, analyzed with AI/ML and streamed via SSE to the dashboard, with GitHub and Cloud Build CI/CD on the upper right.
             </desc>
             <defs>
               <marker id="arrow-cyan-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -393,247 +479,317 @@
               <marker id="arrow-amber-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
               </marker>
+              <marker id="arrow-purple-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc" />
+              </marker>
             </defs>
 
-            <rect x="0" y="0" width="920" height="500" rx="10" fill="#0f172a" />
+            <rect x="0" y="0" width="980" height="560" rx="10" fill="#0f172a" />
 
-            <!-- Left Top: External Scanners -->
-            <rect x="20" y="55" width="175" height="125" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.5" />
-            <text x="107" y="82" fill="#f87171" font-size="13" font-weight="700" text-anchor="middle">External Internet</text>
-            <text x="107" y="102" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">Scanners &amp; Visitors</text>
-            <text x="107" y="124" fill="#94a3b8" font-size="11" text-anchor="middle">34.170.152.225:8080</text>
-            <text x="107" y="142" fill="#94a3b8" font-size="11" text-anchor="middle">HTTP Requests &amp; Payloads</text>
-            <text x="107" y="162" fill="#fca5a5" font-size="10.5" text-anchor="middle">Source IP &amp; Headers</text>
+            <!-- Block 1: Attack Lure (80 Ports) -->
+            <rect x="18" y="34" width="186" height="176" rx="10" fill="#1e293b" stroke="#f87171" stroke-width="1.6" />
+            <text x="111" y="58" fill="#f87171" font-size="12.5" font-weight="700" text-anchor="middle">1. Attack Lure (80 Ports)</text>
+            <text x="111" y="78" fill="#e2e8f0" font-size="11.5" font-weight="600" text-anchor="middle">External Scanners &amp; Bots</text>
+            <text x="111" y="99" fill="#cbd5e1" font-size="10.2" text-anchor="middle">Web/Proxy: 80, 443, 8080, 3128</text>
+            <text x="111" y="117" fill="#cbd5e1" font-size="10.2" text-anchor="middle">Dev/Admin: 3000, 5000, 8069, 9200</text>
+            <text x="111" y="135" fill="#cbd5e1" font-size="10.2" text-anchor="middle">DB/Cache: 3306, 5432, 6379, 27017</text>
+            <text x="111" y="153" fill="#cbd5e1" font-size="10.2" text-anchor="middle">IoT/Cam: 554, 7547, 8291, 37777</text>
+            <text x="111" y="177" fill="#fca5a5" font-size="10.2" text-anchor="middle">FW: hp-allow-honeypot-8080</text>
+            <text x="111" y="194" fill="#94a3b8" font-size="10" text-anchor="middle">SSH (22) via IAP Only</text>
 
-            <!-- Left Bottom: Viewers & Operators -->
-            <rect x="20" y="335" width="175" height="110" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
-            <text x="107" y="362" fill="#38bdf8" font-size="13" font-weight="700" text-anchor="middle">Viewers &amp; Ops</text>
-            <text x="107" y="384" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle">Browser / gcloud / IAP</text>
-            <text x="107" y="406" fill="#94a3b8" font-size="11" text-anchor="middle">roles/viewer + IAP Tunnel</text>
-            <text x="107" y="424" fill="#94a3b8" font-size="11" text-anchor="middle">Log &amp; Status Inspection</text>
+            <!-- Block 2: Multi-Layer Isolation -->
+            <rect x="242" y="34" width="334" height="218" rx="10" fill="#172554" stroke="#34d399" stroke-width="1.8" />
+            <text x="409" y="56" fill="#6ee7b7" font-size="12.5" font-weight="700" text-anchor="middle">2. Multi-Layer Isolation (hp-vm-us-01)</text>
+            <text x="409" y="74" fill="#bfdbfe" font-size="10.8" text-anchor="middle">Container-Optimized OS (us-central1-a) / Non-root hpuser</text>
 
-            <!-- Layer 1: Decoy Observation Layer -->
-            <rect x="245" y="25" width="320" height="175" rx="10" fill="#172554" stroke="#60a5fa" stroke-width="1.8" />
-            <text x="405" y="48" fill="#93c5fd" font-size="12.5" font-weight="700" text-anchor="middle">1. Decoy Observation (honeypot-515503)</text>
-            <text x="405" y="66" fill="#bfdbfe" font-size="11" text-anchor="middle">VM: hp-vm-us-01 (34.170.152.225)</text>
+            <rect x="256" y="84" width="306" height="156" rx="8" fill="#0f172a" stroke="#4ade80" stroke-width="1.3" stroke-dasharray="4 3" />
+            <text x="409" y="103" fill="#e2e8f0" font-size="10.8" font-weight="700" text-anchor="middle">honeypot.py (Port Mapping to :8080 &amp; Stateful Decoy)</text>
+            <text x="409" y="121" fill="#a7f3d0" font-size="10.2" text-anchor="middle">--read-only / --cap-drop=ALL / Non-root hpuser</text>
+            <text x="409" y="138" fill="#a7f3d0" font-size="10.2" text-anchor="middle">256MB RAM / pids-limit=128 / Internal hp-internal</text>
+            <text x="409" y="156" fill="#fde68a" font-size="10.2" text-anchor="middle">iptables: Block 169.254.169.254 SSRF &amp; Outbound</text>
+            <text x="409" y="173" fill="#fde68a" font-size="10.2" text-anchor="middle">VPC: hp-deny-all-egress / PGA (199.36.153.8/30)</text>
+            <text x="409" y="191" fill="#93c5fd" font-size="10.2" text-anchor="middle">Base64/Hex Decode, IOC Extraction &amp; tcpdump PCAP</text>
+            <text x="409" y="226" fill="#86efac" font-size="10" text-anchor="middle">Verify active container ports against startup.sh &amp; boot time</text>
 
-            <!-- Layer 2: Network & Isolation Layer -->
-            <rect x="260" y="78" width="290" height="108" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5 3" />
-            <text x="405" y="97" fill="#6ee7b7" font-size="11.5" font-weight="700" text-anchor="middle">2. Network &amp; Isolation (hp-vpc / hp-internal)</text>
-            <text x="405" y="115" fill="#e2e8f0" font-size="11" text-anchor="middle">hp-nginx (:8080) + honeypot (user: hpuser)</text>
-            <text x="405" y="133" fill="#a7f3d0" font-size="10.5" text-anchor="middle">Egress Deny / PGA (199.36.153.8/30)</text>
-            <text x="405" y="149" fill="#a7f3d0" font-size="10.5" text-anchor="middle">SSH via IAP (35.235.240.0/20) Only</text>
-            <text x="405" y="166" fill="#fca5a5" font-size="10.5" text-anchor="middle">Outbound Pivot Risk Constrained</text>
+            <!-- Block 3: Log Aggregation & Retention -->
+            <rect x="614" y="34" width="348" height="122" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.7" />
+            <text x="788" y="56" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">3. Log Aggregation &amp; Retention</text>
+            <text x="788" y="76" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">Cloud Logging (gcplogs) + Cloud Storage</text>
+            <text x="788" y="96" fill="#e2e8f0" font-size="10.3" text-anchor="middle">Structured JSON logs, decoded payloads &amp; extracted URLs</text>
+            <text x="788" y="114" fill="#cbd5e1" font-size="10.3" text-anchor="middle">PCAP archive: gs://honeypot-archive-515503</text>
+            <text x="788" y="136" fill="#fcd34d" font-size="10.2" text-anchor="middle">IAM: roles/viewer + roles/logging.viewer (Read-Only)</text>
 
-            <!-- Layer 3: Logging Layer -->
-            <rect x="625" y="45" width="275" height="155" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8" />
-            <text x="762" y="70" fill="#fbbf24" font-size="12.5" font-weight="700" text-anchor="middle">3. Logging &amp; Audit Layer</text>
-            <text x="762" y="88" fill="#fde68a" font-size="11" font-weight="600" text-anchor="middle">Cloud Logging &amp; Container Logs</text>
-            <text x="762" y="112" fill="#e2e8f0" font-size="11" text-anchor="middle">hp-nginx &amp; honeypot Output</text>
-            <text x="762" y="132" fill="#e2e8f0" font-size="11" text-anchor="middle">Collected in honeypot-515503</text>
-            <text x="762" y="156" fill="#fcd34d" font-size="10.5" text-anchor="middle">Read Access via roles/viewer</text>
-            <text x="762" y="174" fill="#94a3b8" font-size="10.5" text-anchor="middle">Preserves Live Observation Records</text>
+            <!-- Block 5 (Top Right): CI/CD Pipeline -->
+            <rect x="614" y="174" width="348" height="114" rx="10" fill="#1e1b4b" stroke="#c084fc" stroke-width="1.7" />
+            <text x="788" y="195" fill="#d8b4fe" font-size="12" font-weight="700" text-anchor="middle">5. Automated CI/CD (No Public SSH)</text>
+            <text x="788" y="215" fill="#e9d5ff" font-size="10.3" text-anchor="middle">Mac (git push) -&gt; GitHub (jun172/honeypot)</text>
+            <text x="788" y="233" fill="#e9d5ff" font-size="10.3" text-anchor="middle">-&gt; Cloud Build -&gt; Artifact Registry (asia-northeast1)</text>
+            <text x="788" y="251" fill="#e9d5ff" font-size="10.3" text-anchor="middle">-&gt; VM Metadata Update &amp; Instance Reset/Rollout</text>
+            <text x="788" y="271" fill="#c4b5fd" font-size="10" text-anchor="middle">Updates honeypot-http and hp-nginx container images</text>
 
-            <!-- Layer 4: Access Control & Visualization Layer -->
-            <rect x="245" y="295" width="655" height="165" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
-            <text x="572" y="320" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">4. Access Control &amp; Visualization (IAM / Cloud Logging / UI)</text>
-            <text x="572" y="340" fill="#bbf7d0" font-size="11" text-anchor="middle">Least-Privilege IAM (roles/viewer + roles/iap.tunnelResourceAccessor)</text>
+            <!-- Block 4: AI/ML & Dashboard -->
+            <rect x="242" y="314" width="720" height="216" rx="10" fill="#132a24" stroke="#4ade80" stroke-width="1.8" />
+            <text x="602" y="338" fill="#4ade80" font-size="13" font-weight="700" text-anchor="middle">4. AI/ML Analytics &amp; Real-Time Dashboard (Honeypot-Log)</text>
+            <text x="602" y="357" fill="#bbf7d0" font-size="10.8" text-anchor="middle">IsolationForest Anomaly Scoring, Attack Clustering &amp; HTTP Fingerprints streamed via SSE every 3s</text>
 
-            <rect x="268" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="360" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Log Inspection</text>
-            <text x="360" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">Cloud Logging Queries</text>
-            <text x="360" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Scan &amp; Request Review</text>
+            <rect x="262" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="368" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">AI/ML Analysis Engine</text>
+            <text x="368" y="413" fill="#94a3b8" font-size="10.2" text-anchor="middle">IsolationForest anomaly scoring</text>
+            <text x="368" y="431" fill="#94a3b8" font-size="10.2" text-anchor="middle">Attack &amp; payload clustering</text>
+            <text x="368" y="449" fill="#94a3b8" font-size="10.2" text-anchor="middle">IOC (URL / IP / decoded) extraction</text>
+            <text x="368" y="469" fill="#86efac" font-size="10" text-anchor="middle">Highlights novel &amp; high-risk scans</text>
 
-            <rect x="478" y="356" width="190" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="573" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Safe Formatting</text>
-            <text x="573" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">Escaping &amp; Length Bounds</text>
-            <text x="573" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Endpoint &amp; Status Checks</text>
+            <rect x="496" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="602" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">SSE Stream &amp; Sanitization</text>
+            <text x="602" y="413" fill="#94a3b8" font-size="10.2" text-anchor="middle">3-second Server-Sent Events stream</text>
+            <text x="602" y="431" fill="#94a3b8" font-size="10.2" text-anchor="middle">CSP, escaping &amp; length bounds</text>
+            <text x="602" y="449" fill="#94a3b8" font-size="10.2" text-anchor="middle">Port, vector &amp; source aggregation</text>
+            <text x="602" y="469" fill="#7dd3fc" font-size="10" text-anchor="middle">Low-latency threat visibility</text>
 
-            <rect x="693" y="356" width="185" height="84" rx="7" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
-            <text x="785" y="376" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">Web Interface</text>
-            <text x="785" y="396" fill="#94a3b8" font-size="10.5" text-anchor="middle">Dashboard &amp; Architecture</text>
-            <text x="785" y="414" fill="#94a3b8" font-size="10.5" text-anchor="middle">Japanese / English Switcher</text>
+            <rect x="730" y="372" width="212" height="136" rx="8" fill="#0f172a" stroke="#475569" stroke-width="1.2" />
+            <text x="836" y="393" fill="#e2e8f0" font-size="11" font-weight="700" text-anchor="middle">UI &amp; Architecture Docs</text>
+            <text x="836" y="413" fill="#94a3b8" font-size="10.2" text-anchor="middle">Live attack monitoring dashboard</text>
+            <text x="836" y="431" fill="#94a3b8" font-size="10.2" text-anchor="middle">Environment &amp; architecture page</text>
+            <text x="836" y="449" fill="#94a3b8" font-size="10.2" text-anchor="middle">Japanese / English switcher</text>
+            <text x="836" y="469" fill="#fde68a" font-size="10" text-anchor="middle">Portfolio &amp; technical reference</text>
+
+            <!-- Bottom Left: Read-Only Ops -->
+            <rect x="18" y="372" width="186" height="136" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.6" />
+            <text x="111" y="396" fill="#38bdf8" font-size="12.5" font-weight="700" text-anchor="middle">Read-Only Ops</text>
+            <text x="111" y="416" fill="#e2e8f0" font-size="11" font-weight="600" text-anchor="middle">Browser / gcloud / IAP</text>
+            <text x="111" y="438" fill="#94a3b8" font-size="10.2" text-anchor="middle">IAM: roles/viewer</text>
+            <text x="111" y="455" fill="#94a3b8" font-size="10.2" text-anchor="middle">+ roles/logging.viewer</text>
+            <text x="111" y="476" fill="#7dd3fc" font-size="10" text-anchor="middle">Safe read-only observation</text>
 
             <!-- Arrows -->
-            <line x1="195" y1="115" x2="256" y2="115" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-en)" />
-            <text x="225" y="106" fill="#fca5a5" font-size="10" font-weight="600" text-anchor="middle">:8080 Traffic</text>
+            <line x1="204" y1="122" x2="238" y2="122" stroke="#f87171" stroke-width="2" marker-end="url(#arrow-red-en)" />
+            <text x="221" y="112" fill="#fca5a5" font-size="9.5" font-weight="600" text-anchor="middle">80 Ports</text>
 
-            <line x1="565" y1="118" x2="621" y2="118" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-en)" />
-            <text x="593" y="108" fill="#fde68a" font-size="9.8" font-weight="600" text-anchor="middle">Emit Logs</text>
+            <line x1="576" y1="96" x2="610" y2="96" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber-en)" />
+            <text x="593" y="86" fill="#fde68a" font-size="9.5" font-weight="600" text-anchor="middle">Logs</text>
 
-            <path d="M 762 200 L 762 248 L 572 248 L 572 291" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-en)" />
-            <text x="667" y="240" fill="#7dd3fc" font-size="10.5" font-weight="600" text-anchor="middle">Read Cloud Logging</text>
+            <line x1="614" y1="226" x2="580" y2="226" stroke="#c084fc" stroke-width="2" marker-end="url(#arrow-purple-en)" />
+            <text x="597" y="216" fill="#e9d5ff" font-size="9" font-weight="600" text-anchor="middle">CI/CD</text>
 
-            <line x1="245" y1="390" x2="199" y2="390" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-en)" />
-            <text x="222" y="380" fill="#86efac" font-size="10" font-weight="600" text-anchor="middle">Observe</text>
+            <path d="M 788 156 L 788 310" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-cyan-en)" />
+            <text x="844" y="302" fill="#7dd3fc" font-size="10" font-weight="600" text-anchor="middle">Analyze &amp; Stream</text>
+
+            <line x1="242" y1="438" x2="208" y2="438" stroke="#4ade80" stroke-width="2" marker-end="url(#arrow-green-en)" />
+            <text x="225" y="428" fill="#86efac" font-size="9.5" font-weight="600" text-anchor="middle">View UI</text>
           </svg>
-          <div class="arch-diagram-caption">Figure 1: Live Architecture Centered on honeypot-515503, hp-vm-us-01, hpuser, and Cloud Logging</div>
+          <div class="arch-diagram-caption">Figure 1: Five-Block Architecture (80 Lure Ports, Multi-Layer Isolation, Log Retention, AI/ML UI, and CI/CD)</div>
         </div>
 
         <div class="arch-grid">
           <div class="arch-box">
-            <h3>1. Decoy Observation Layer (Project: <code>honeypot-515503</code> / VM: <code>hp-vm-us-01</code>)</h3>
+            <h3>1. Attack Lure Layer (80 Exposed Ports)</h3>
             <p>
-              Hosted on Compute Engine instance <code>hp-vm-us-01</code> (external IP: <code>34.170.152.225</code>), running reverse proxy <code>hp-nginx</code> and honeypot container <code>honeypot</code> connected via Docker network <code>hp-internal</code>. Requests arriving on port 8080 are proxied to <code>honeypot</code> for decoy responses and logging.
+              Firewall rule <code>hp-allow-honeypot-8080</code> directs 80 ports to VM <code>hp-vm-us-01</code> across web/proxy (43 ports: <code>80</code>, <code>443</code>, <code>8080</code>, <code>3128</code>, etc.), dev/admin panels (21 ports: <code>3000</code>, <code>5000</code>, <code>8069</code>, <code>9200</code>, etc.), databases/caches (7 ports: <code>3306</code>, <code>5432</code>, <code>6379</code>, <code>27017</code>, etc.), and IoT/routers/cameras (9 ports: <code>554</code>, <code>7547</code>, <code>8291</code>, <code>37777</code>, etc.), while SSH (port <code>22</code>) is restricted to IAP (<code>35.235.240.0/20</code>).
             </p>
           </div>
           <div class="arch-box">
-            <h3>2. Network &amp; Non-Root Isolation Layer (VPC: <code>hp-vpc</code> / User: <code>hpuser</code>)</h3>
+            <h3>2. Multi-Layer Isolation (<code>--read-only</code> / <code>iptables</code> / <code>hpuser</code>)</h3>
             <ul>
-              <li><strong>Non-Root Container User (<code>hpuser</code>):</strong> The honeypot runs as non-privileged user <code>hpuser</code> rather than root to reduce privilege-escalation impact.</li>
-              <li><strong>VPC &amp; Port Exposure:</strong> Uses <code>hp-vpc</code> (<code>hp-subnet-us</code>) and <code>hp-internal</code> for internal container separation, with <code>hp-allow-honeypot-8080</code> exposing port 8080.</li>
-              <li><strong>Egress Controls:</strong> Rules such as <code>hp-allow-pga-egress</code> (<code>199.36.153.8/30</code> TCP 443) and <code>hp-deny-all-egress</code> constrain unrestricted outbound traffic from the VM.</li>
-              <li><strong>IAP-Only SSH:</strong> SSH (TCP 22) is restricted via <code>hp-allow-iap-ssh</code> to Identity-Aware Proxy (<code>35.235.240.0/20</code>).</li>
+              <li><strong>Hardened Container:</strong> Combines read-only rootfs (<code>--read-only</code>), dropped capabilities (<code>--cap-drop=ALL</code>), non-root user <code>hpuser</code>, 256MB memory limit, <code>pids-limit=128</code>, and internal network <code>hp-internal</code>.</li>
+              <li><strong>SSRF &amp; Egress Controls:</strong> Uses <code>iptables</code> to block metadata SSRF (<code>169.254.169.254</code>) and outbound traffic alongside VPC rule <code>hp-deny-all-egress</code> (with PGA <code>199.36.153.8/30</code> TCP 443).</li>
+              <li><strong>Stateful Decoys &amp; PCAP Capture:</strong> <code>honeypot.py</code> returns dynamic responses, decodes Base64/Hex payloads, extracts IOCs (URLs/IPs), and captures packets via <code>tcpdump</code>.</li>
             </ul>
           </div>
           <div class="arch-box">
-            <h3>3. Logging &amp; Audit Layer (Cloud Logging &amp; Container Logs)</h3>
+            <h3>3. Log Aggregation &amp; Retention (Cloud Logging &amp; GCS)</h3>
             <p>
-              Access and application output from <code>hp-nginx</code> and <code>honeypot</code> are recorded in container logs and Cloud Logging to preserve visibility into external requests and scan activity.
+              Structured JSON telemetry (attack classifications, decoded payloads, and extracted URLs) streams to Cloud Logging (<code>gcplogs</code>), while packet captures (<code>.pcap</code>) are archived in Cloud Storage bucket <code>gs://honeypot-archive-515503</code>.
             </p>
           </div>
           <div class="arch-box">
-            <h3>4. Least-Privilege Access &amp; Visualization Layer</h3>
+            <h3>4. AI/ML Visualization &amp; 5. Automated CI/CD</h3>
             <p>
-              Operator IAM access is narrowed to <code>roles/viewer</code> (along with <code>roles/iap.tunnelResourceAccessor</code> for IAP SSH), preventing unintended edits or deletions while supporting log review and bilingual UI navigation.
+              Logs undergo <code>IsolationForest</code> anomaly scoring and attack clustering, streaming every 3 seconds via SSE to the dashboard. Pushing to GitHub (<code>jun172/honeypot</code>) triggers Cloud Build to build <code>honeypot-http</code> and <code>hp-nginx</code> images in Artifact Registry (<code>asia-northeast1-docker.pkg.dev</code>) and update/restart the VM without public SSH.
             </p>
+          </div>
+        </div>
+        <div class="doc-note">
+          <strong>Port Synchronization Note:</strong> Even when firewall rule <code>hp-allow-honeypot-8080</code> permits 80 ports, active container listening ports on <code>hp-vm-us-01</code> may reflect an earlier boot (such as 45 ports) until the 80-port <code>startup.sh</code> is pushed via <code>git push</code> and applied on the VM.
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>3. Attack Coverage &amp; Design Boundaries</h2>
+          <span class="badge badge-info">Threat Coverage</span>
+        </div>
+        <div class="arch-grid">
+          <div class="arch-box">
+            <h3>Supported Attack Vectors (HTTP/HTTPS &amp; 80 Lure Ports)</h3>
+            <ul>
+              <li><strong>IoT &amp; Router Botnets (Mirai / Mozi):</strong> Responds dynamically to liveness checks and simulates architecture mismatch errors (<code>Exec format error</code>) to elicit multi-architecture malware download URLs (<code>http://&lt;IP&gt;/...</code>).</li>
+              <li><strong>Modern Framework RCEs:</strong> Emulates realistic responses for probes targeting Next.js Server Actions (<code>next-action</code>), Laravel/PHPUnit (<code>eval-stdin.php</code> / <code>.env</code>), ThinkPHP, Spring Boot (<code>/actuator/env</code>), and Jenkins (<code>/script</code>).</li>
+              <li><strong>Header Exploits &amp; Web/DB Scans:</strong> Scans all headers and auto-decodes Base64/Hex for Log4j (<code>${jndi:ldap://...}</code>) or Shellshock, alongside SQL injection, XSS, path traversal (decoy <code>/etc/passwd</code>), WordPress brute-force, and open-proxy probes.</li>
+            </ul>
+          </div>
+          <div class="arch-box">
+            <h3>Out-of-Scope &amp; Safety Boundaries</h3>
+            <ul>
+              <li><strong>Non-HTTP Binary Protocols:</strong> Interactive SSH logins on port 22 or dedicated binary handshakes for SMB/RDP are outside HTTP decoy scope (management SSH is restricted to IAP).</li>
+              <li><strong>OS Compromise or Outbound Pivot:</strong> Blocking arbitrary command execution and outbound connections prevents the honeypot from being used as a pivot or DDoS launchpad.</li>
+            </ul>
           </div>
         </div>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>3. GCP Services Used in This Deployment</h2>
-          <span class="badge badge-info">GCP Services</span>
+          <h2>4. GCP Services &amp; Associated Tools</h2>
+          <span class="badge badge-info">GCP &amp; Tooling</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Category</th>
-                <th>Google Cloud Service</th>
-                <th>Role in Current Deployment</th>
+                <th>Area</th>
+                <th>GCP Service / Tool</th>
+                <th>Role in the System</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>Compute VM</strong></td>
-                <td>Compute Engine</td>
-                <td>Runs VM <code>hp-vm-us-01</code> (external IP <code>34.170.152.225</code>) hosting <code>hp-nginx</code> and <code>honeypot</code>.</td>
+                <td><strong>Compute &amp; OS</strong></td>
+                <td>Compute Engine (GCE)</td>
+                <td>Hosts VM <code>hp-vm-us-01</code> (<code>us-central1-a</code> / Container-Optimized OS).</td>
               </tr>
               <tr>
-                <td><strong>Networking &amp; Firewall</strong></td>
-                <td>Virtual Private Cloud (VPC)</td>
-                <td>Provides <code>hp-vpc</code> / <code>hp-subnet-us</code>, <code>hp-allow-honeypot-8080</code>, <code>hp-allow-iap-ssh</code>, and egress controls.</td>
+                <td><strong>Network &amp; Firewall</strong></td>
+                <td>VPC Network / Firewall</td>
+                <td>Provides isolated network <code>hp-vpc</code>, 80-port ingress (<code>hp-allow-honeypot-8080</code>), and outbound block (<code>hp-deny-all-egress</code>).</td>
               </tr>
               <tr>
-                <td><strong>Secure Tunneling</strong></td>
-                <td>Identity-Aware Proxy (IAP)</td>
-                <td>Provides authenticated SSH access from <code>35.235.240.0/20</code> to <code>hp-vm-us-01</code>.</td>
+                <td><strong>CI/CD &amp; Source</strong></td>
+                <td>GitHub / Cloud Build</td>
+                <td>Watches <code>jun172/honeypot</code> pushes to build container images and update/restart GCE.</td>
               </tr>
               <tr>
-                <td><strong>Logging</strong></td>
-                <td>Cloud Logging</td>
-                <td>Captures and exposes VM and container logs for post-exposure inspection.</td>
+                <td><strong>Container Registry</strong></td>
+                <td>Artifact Registry</td>
+                <td>Stores built <code>honeypot-http</code> and <code>hp-nginx</code> images in <code>asia-northeast1-docker.pkg.dev</code>.</td>
               </tr>
               <tr>
-                <td><strong>Access Control</strong></td>
-                <td>Identity and Access Management (IAM)</td>
-                <td>Enforces least-privilege <code>roles/viewer</code> and <code>roles/iap.tunnelResourceAccessor</code> bindings.</td>
+                <td><strong>Logging &amp; Storage</strong></td>
+                <td>Cloud Logging (<code>gcplogs</code>) / Cloud Storage</td>
+                <td>Collects structured JSON attack logs and archives <code>.pcap</code> captures in <code>gs://honeypot-archive-515503</code>.</td>
               </tr>
               <tr>
-                <td><strong>Build &amp; Registry</strong></td>
-                <td>Cloud Build / Artifact Registry</td>
-                <td>Builds and stores container images pulled onto <code>hp-vm-us-01</code>.</td>
+                <td><strong>IAM &amp; IAP</strong></td>
+                <td>IAM / Identity-Aware Proxy (IAP)</td>
+                <td>Enforces read-only access (<code>roles/viewer</code> + <code>roles/logging.viewer</code>) and IAP SSH (<code>35.235.240.0/20</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>In-Container Stack</strong></td>
+                <td>Python (<code>honeypot.py</code>) / Docker / <code>tcpdump</code> / netshoot / Google Cloud SDK</td>
+                <td>Handles HTTP decoys, classification, IOC extraction, isolated execution, and PCAP capture/upload.</td>
               </tr>
             </tbody>
           </table>
         </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>4. Development &amp; Runtime Stack</h2>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Category</th>
-                <th>Components / Tools</th>
-                <th>Role</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>Local CLI &amp; Git</strong></td>
-                <td>macOS / zsh / <code>gcloud</code> / Git</td>
-                <td>Source management, image builds, and VM/IAM/firewall verification</td>
-              </tr>
-              <tr>
-                <td><strong>VM &amp; Containers</strong></td>
-                <td><code>hp-vm-us-01</code> / Docker / <code>hp-internal</code></td>
-                <td>Container orchestration and internal network isolation</td>
-              </tr>
-              <tr>
-                <td><strong>Honeypot Service</strong></td>
-                <td><code>honeypot</code> container / <code>hpuser</code></td>
-                <td>Non-root HTTP decoy response and request logging</td>
-              </tr>
-              <tr>
-                <td><strong>Reverse Proxy</strong></td>
-                <td><code>hp-nginx</code> container</td>
-                <td>Listens on port 8080 and forwards traffic to <code>honeypot</code></td>
-              </tr>
-              <tr>
-                <td><strong>Observability</strong></td>
-                <td>Cloud Logging / <code>docker logs</code></td>
-                <td>Inspecting live traffic and container status</td>
-              </tr>
-              <tr>
-                <td><strong>Frontend</strong></td>
-                <td>HTML5 / CSS3 / JavaScript</td>
-                <td>Dashboard and architecture documentation with JA/EN switching</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>5. Current Operational Snapshot</h2>
-          <span class="badge badge-danger">Live Status</span>
-        </div>
-        <p class="doc-body">
-          On <code>hp-vm-us-01</code> (<code>34.170.152.225</code>), <code>hp-nginx</code> and <code>honeypot</code> (running as <code>hpuser</code>) serve public port 8080 traffic via <code>hp-allow-honeypot-8080</code>, while egress rules, IAP-restricted SSH, Cloud Logging, and <code>roles/viewer</code> IAM constraints keep the environment locked down for observation.
+        <p class="doc-note">
+          Note: Service agent roles such as <code>roles/run.serviceAgent</code>, <code>roles/pubsub.serviceAgent</code>, or <code>roles/container.serviceAgent</code> may appear in IAM when APIs are enabled, while core active workloads run on Compute Engine, Artifact Registry, Cloud Build, Cloud Logging, and Cloud Storage.
         </p>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>6. Security &amp; Operational Safeguards</h2>
-          <span class="badge badge-success">Least Privilege &amp; Isolation</span>
+          <h2>5. Stack &amp; Key Architectural Highlights</h2>
+          <span class="badge badge-success">Architecture Highlights</span>
         </div>
-        <div class="arch-grid">
-          <div class="arch-box">
-            <h3>Non-Root Execution (<code>hpuser</code>) &amp; Isolation</h3>
-            <p>
-              Running <code>honeypot</code> as <code>hpuser</code> behind <code>hp-nginx</code> over <code>hp-internal</code> separates external exposure from application execution.
-            </p>
-          </div>
-          <div class="arch-box">
-            <h3>Egress Restrictions &amp; IAP SSH</h3>
-            <p>
-              <code>hp-vpc</code> egress rules limit outbound traffic while <code>hp-allow-iap-ssh</code> restricts SSH access to IAP (<code>35.235.240.0/20</code>).
-            </p>
-          </div>
-          <div class="arch-box">
-            <h3>Viewer IAM &amp; Cloud Logging</h3>
-            <p>
-              Restricting operator access to <code>roles/viewer</code> (plus <code>roles/iap.tunnelResourceAccessor</code>) prevents accidental mutations while preserving log inspection via Cloud Logging.
-            </p>
-          </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Stack &amp; Design</th>
+                <th>Key Strength</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Decoy Backend</strong></td>
+                <td>Pure Python (standard-library focused, minimal external dependencies)</td>
+                <td>Reduces supply-chain risk while supporting dynamic responses, Base64/Hex decoding, and IOC extraction.</td>
+              </tr>
+              <tr>
+                <td><strong>Defense in Depth</strong></td>
+                <td><code>--read-only</code> / <code>--cap-drop=ALL</code> / <code>hpuser</code> / <code>iptables</code> / VPC</td>
+                <td>Layers read-only containers, non-root execution, metadata SSRF blocking, and outbound traffic denial.</td>
+              </tr>
+              <tr>
+                <td><strong>Zero-Trust CI/CD</strong></td>
+                <td>GitHub + Cloud Build + Artifact Registry + IAP</td>
+                <td>Automates image builds and rollouts with least-privilege access and no public SSH exposure.</td>
+              </tr>
+              <tr>
+                <td><strong>AI/ML Telemetry</strong></td>
+                <td><code>IsolationForest</code> / clustering / 3s SSE stream / JA &amp; EN UI</td>
+                <td>Surfaces anomalies and clusters attack traffic in real time for fast threat triage.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>6. Future Challenges &amp; Expansion Roadmap</h2>
+          <span class="badge badge-info">Roadmap: Phase 2 &amp; Phase 3</span>
+        </div>
+        <p class="doc-lead">
+          Having established safe observation and real-time visualization (Phase 1), the platform can evolve toward automated sample collection (Phase 2) and protocol- or AI-target-specific decoys (Phase 3).
+        </p>
+
+        <h3>Current Challenges</h3>
+        <ul class="roadmap-list">
+          <li><strong>Limited Non-HTTP Binary Interaction:</strong> Database (3306, 6379, 27017) and RTSP (554) ports currently feed HTTP listeners, so binary-native clients may disconnect early.</li>
+          <li><strong>Manual Sample Retrieval &amp; Analysis:</strong> Extracted malware URLs are logged automatically, whereas fetching binaries before C2 takedown and analyzing them in REMnux (<code>floss</code>, Ghidra, YARA) can be further automated.</li>
+          <li><strong>Deeper Post-Exploitation State:</strong> Simulating multi-step post-access behavior (such as revisiting uploaded web shells) in memory offers room for richer interaction.</li>
+          <li><strong>TLS/HTTPS (443 / 8443) Coverage:</strong> Clients requiring TLS handshakes from the start are not yet terminated over HTTPS.</li>
+        </ul>
+
+        <h3>Expansion Roadmap (By Priority)</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Enhancement</th>
+                <th>Implementation Concept &amp; Expected Impact</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>High 1</strong></td>
+                <td>Isolated Crawler &amp; Sandbox Automation</td>
+                <td>Trigger an isolated crawler via Pub/Sub on <code>captured_attacker_urls</code> to download samples into Cloud Storage, compute SHA-256 hashes, and run YARA classification.</td>
+              </tr>
+              <tr>
+                <td><strong>High 2</strong></td>
+                <td>Automated Blocklist / IOC Feedback</td>
+                <td>Aggregate confirmed attacker IPs and C2 URLs into STIX/TAXII or firewall blocklists to support active defense.</td>
+              </tr>
+              <tr>
+                <td><strong>Med 3</strong></td>
+                <td>Protocol &amp; AI-API Lightweight Decoys</td>
+                <td>Add targeted responses for Redis (<code>6379</code> <code>CONFIG SET</code>) and fake Ollama/OpenAI endpoints (<code>11434</code>, <code>/v1/models</code>) to capture AI-server hijacking bots.</td>
+              </tr>
+              <tr>
+                <td><strong>Med 4</strong></td>
+                <td>HTTPS (443 / 8443) Termination</td>
+                <td>Enable TLS termination with self-signed certificates so HTTPS-first scanners and bots can also be observed.</td>
+              </tr>
+              <tr>
+                <td><strong>Low 5</strong></td>
+                <td>LLM-Assisted Attack Summaries</td>
+                <td>Pass obfuscated or Base64 payloads asynchronously to an LLM to generate concise Japanese and English summaries of targeted vulnerabilities and intent.</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
     </div>
