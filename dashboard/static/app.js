@@ -169,13 +169,17 @@ function t(key) {
   return I18N[currentLang]?.[key] ?? I18N.ja[key] ?? key;
 }
 
-function sanitizeText(val, fallback = "", maxLen = 1000) {
+// maxLen <= 0 のときは省略なしで全文を返す
+function sanitizeText(val, fallback = "", maxLen = 0) {
   if (val === null || val === undefined) return fallback;
   const cleaned = String(val).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
-  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
+  if (maxLen > 0 && cleaned.length > maxLen) {
+    return `${cleaned.slice(0, maxLen)}…`;
+  }
+  return cleaned;
 }
 
-function toSafeText(val, fallback = "", maxLen = 1000) {
+function toSafeText(val, fallback = "", maxLen = 0) {
   return sanitizeText(val, fallback, maxLen);
 }
 
@@ -266,9 +270,26 @@ function getCountryLabel(item) {
 function getAttackSummaryText(ev) {
   if (!ev || typeof ev !== "object") return "";
   if (currentLang === "en") {
-    return toSafeText(ev.attack_summary_en || ev.attack_summary, "", 260);
+    return toSafeText(ev.attack_summary_en || ev.attack_summary, "", 500);
   }
-  return toSafeText(ev.attack_summary || ev.attack_summary_en, "", 260);
+  return toSafeText(ev.attack_summary || ev.attack_summary_en, "", 500);
+}
+
+function getFullRequestDetailText(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const methodStr = toSafeText(ev.method, "GET");
+  const pathStr = toSafeText(ev.path, "/");
+  const fullPayload = toSafeText(ev.payload_full || ev.payload || "");
+  const prettyFull = toSafeText(ev.raw_json_pretty_full || ev.raw_json_pretty || "");
+
+  const parts = [`${methodStr} ${pathStr}`];
+  if (fullPayload) {
+    parts.push(fullPayload);
+  }
+  if (prettyFull) {
+    parts.push(`--- JSON (FULL) ---\n${prettyFull}`);
+  }
+  return parts.join("\n");
 }
 
 function applySearchFilter(queryText) {
@@ -453,7 +474,7 @@ function renderRightAnalytics(rightAnalytics) {
     const ul = document.createElement("ul");
     clusters.slice(0, 6).forEach((cl) => {
       const li = document.createElement("li");
-      const label = toSafeText(cl.label, "Cluster", 100);
+      const label = toSafeText(cl.label, "Cluster", 120);
       const cnt = Number(cl.count) || 0;
       const share = Number(cl.share_pct) || 0;
       const btn = document.createElement("button");
@@ -479,7 +500,7 @@ function renderRightAnalytics(rightAnalytics) {
     const ul = document.createElement("ul");
     tactics.slice(0, 6).forEach((tc) => {
       const li = document.createElement("li");
-      const name = toSafeText(tc.tactic, "Unknown", 100);
+      const name = toSafeText(tc.tactic, "Unknown", 120);
       const cnt = Number(tc.count) || 0;
       const share = Number(tc.share_pct) || 0;
       li.textContent = `${name} — ${cnt.toLocaleString()} (${share}%)`;
@@ -498,7 +519,7 @@ function renderRightAnalytics(rightAnalytics) {
     const ul = document.createElement("ul");
     paths.slice(0, 6).forEach((p) => {
       const li = document.createElement("li");
-      const ep = toSafeText(p.endpoint, "/", 120);
+      const ep = toSafeText(p.endpoint, "/", 200);
       const cnt = Number(p.count) || 0;
       li.appendChild(createTextEl("code", ep));
       li.appendChild(document.createTextNode(` (${cnt.toLocaleString()})`));
@@ -519,7 +540,7 @@ function renderRightAnalytics(rightAnalytics) {
       const li = document.createElement("li");
       const ip = toSafeText(ev.ip, "", 64);
       const score = Number(ev.anomaly_score) || 0;
-      const sum = toSafeText(ev.attack_summary || ev.category, "", 120);
+      const sum = toSafeText(ev.attack_summary || ev.category, "", 200);
       li.appendChild(createTextEl("code", ip));
       li.appendChild(document.createTextNode(` [${score}%] ${sum}`));
       ul.appendChild(li);
@@ -612,11 +633,14 @@ function getFilteredTimeline(timeline) {
       ev.cluster_label,
       ev.method,
       ev.path,
+      ev.payload_full,
       ev.payload,
+      ev.raw_json_pretty_full,
+      ev.raw_json_pretty,
       ev.timestamp,
     ]
       .filter((v) => v !== null && v !== undefined)
-      .map((v) => sanitizeText(v, "", 500))
+      .map((v) => sanitizeText(v, ""))
       .join(" ")
       .toLowerCase();
     return haystack.includes(q);
@@ -670,7 +694,7 @@ function renderIpTable(topIps) {
   if (!ipBody) return;
 
   const items = (Array.isArray(topIps) ? topIps : []).filter(
-    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
+    (item) => item && typeof item !== "object" && !isGoogleOrPrivateEntry(item)
   );
 
   const fragment = document.createDocumentFragment();
@@ -738,26 +762,25 @@ function renderTimelineTable(timeline) {
   filtered.forEach((ev) => {
     const tsStr = toSafeText(ev.timestamp, "", 40);
     const ipStr = toSafeText(ev.ip, "", 64);
-    const pathStr = toSafeText(ev.path, "/", 300);
+    const pathStr = toSafeText(ev.path, "/");
     const methodStr = toSafeText(ev.method, "GET", 20);
-    const payloadStr = toSafeText(ev.payload, "", 400);
     const categoryStr = toSafeText(ev.category, "Unknown", 80);
-    const clusterStr = toSafeText(ev.cluster_label, "", 100);
+    const clusterStr = toSafeText(ev.cluster_label, "", 120);
     const summaryStr = getAttackSummaryText(ev);
-    const basisStr = toSafeText(ev.analysis_basis, "", 240);
+    const basisStr = toSafeText(ev.analysis_basis, "", 300);
     const scoreNum = Number(ev.anomaly_score);
     const safeScore = Number.isFinite(scoreNum)
       ? Math.max(0, Math.min(100, Math.round(scoreNum)))
       : 0;
 
-    const evId = toSafeText(ev.id, "", 128) || `${tsStr}_${ipStr}_${methodStr}_${pathStr}`;
+    const evId = toSafeText(ev.id, "", 128) || `${tsStr}_${ipStr}_${methodStr}_${pathStr.slice(0, 80)}`;
     if (nextSeen.size < MAX_SEEN_EVENT_IDS) {
       nextSeen.add(evId);
     }
 
     const isNew = trackNew && !seenEventIds.has(evId);
     const timeShort = tsStr.replace("T", " ").slice(0, 19);
-    const reqPreview = `${methodStr} ${pathStr}${payloadStr ? " | " + payloadStr : ""}`;
+    const fullDetailText = getFullRequestDetailText(ev);
 
     const tr = document.createElement("tr");
     if (isNew) {
@@ -800,7 +823,15 @@ function renderTimelineTable(timeline) {
       tdPayload.appendChild(createTextEl("span", basisStr, "muted analysis-basis-text"));
       tdPayload.appendChild(document.createElement("br"));
     }
-    tdPayload.appendChild(createTextEl("code", reqPreview));
+    const preEl = document.createElement("pre");
+    preEl.className = "json-full-detail";
+    preEl.style.whiteSpace = "pre-wrap";
+    preEl.style.wordBreak = "break-all";
+    preEl.style.margin = "4px 0 0 0";
+    preEl.style.maxHeight = "none";
+    preEl.style.overflow = "visible";
+    preEl.appendChild(createTextEl("code", fullDetailText));
+    tdPayload.appendChild(preEl);
 
     tr.appendChild(tdTime);
     tr.appendChild(tdSource);
@@ -982,7 +1013,7 @@ function connectStream() {
     }
     if (liveDot) liveDot.classList.remove("paused");
     try {
-      if (typeof event.data === "string" && event.data.length > 10_000_000) {
+      if (typeof event.data === "string" && event.data.length > 25_000_000) {
         throw new Error("SSE payload too large");
       }
       const data = JSON.parse(event.data);

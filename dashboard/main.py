@@ -88,6 +88,10 @@ def _load_dotenv_if_present() -> None:
 
 _load_dotenv_if_present()
 
+# gRPC C++ コアの Info ログ（ev_poll_posix.cc 等）を抑制
+os.environ.setdefault("GRPC_VERBOSITY", os.getenv("GRPC_VERBOSITY", "ERROR").strip() or "ERROR")
+os.environ.setdefault("GRPC_TRACE", os.getenv("GRPC_TRACE", "").strip())
+
 std_logging.basicConfig(level=std_logging.INFO)
 logger = std_logging.getLogger("honeypot-dashboard")
 
@@ -135,6 +139,12 @@ MAX_STREAM_DURATION_SEC = _env_float("MAX_STREAM_DURATION_SEC", 45.0, min_val=5.
 MAX_LOG_CACHE_ENTRIES = _env_int("MAX_LOG_CACHE_ENTRIES", 128, min_val=1, max_val=2048)
 MAX_GEO_CACHE_ENTRIES = _env_int("MAX_GEO_CACHE_ENTRIES", 10000, min_val=1, max_val=100000)
 MAX_GCS_BLOB_BYTES = _env_int("MAX_GCS_BLOB_BYTES", 50 * 1024 * 1024, min_val=1024)
+
+# サーバー側への IP .txt 自動保存設定（既定: 有効、Cloud Run 等の読み取り専用環境では SAVE_IPS_TXT=false で無効化可能）
+SAVE_IPS_TXT = _env_bool("SAVE_IPS_TXT", True)
+IPS_TXT_PATH = Path(
+    (os.getenv("IPS_TXT_PATH") or str(Path(__file__).resolve().parent / "detected_ips.txt")).strip()
+)
 MIN_STREAM_INTERVAL_SEC = 1.0
 
 # 教師なしクラスタリング設定（0以下でサンプル数から自動決定）
@@ -184,7 +194,6 @@ BQ_PROJECT_ID = (os.getenv("BQ_PROJECT_ID") or GCP_PROJECT_ID).strip()
 BQ_DATASET_ID = (os.getenv("BQ_DATASET_ID") or "honeypot_dataset").strip()
 BQ_TABLE_NAME = (os.getenv("BQ_TABLE_NAME") or "run_googleapis_com_stdout").strip()
 BQ_TABLE_ID = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_NAME}"
-# 403権限エラー防止のため既定は false（必要な場合のみ ENABLE_BIGQUERY_LOGS=true で有効化）
 ENABLE_BIGQUERY_LOGS = _env_bool("ENABLE_BIGQUERY_LOGS", False)
 
 LOG_SOURCE_MODE = (os.getenv("LOG_SOURCE_MODE") or "all").strip().lower()
@@ -200,7 +209,8 @@ STREAM_INTERVAL_SEC = _env_float("STREAM_INTERVAL_SEC", 3.0, min_val=MIN_STREAM_
 LOG_CACHE_TTL = _env_float("LOG_CACHE_TTL", 5.0, min_val=1.0)
 
 SHOW_ALL_JSON = _env_bool("SHOW_ALL_JSON", True)
-MAX_DISPLAY_TEXT_LEN = _env_int("MAX_DISPLAY_TEXT_LEN", 4000, min_val=100, max_val=20000)
+# 0 で無制限（全文出力）。正の値を指定した場合はその文字数まで出力。
+MAX_DISPLAY_TEXT_LEN = _env_int("MAX_DISPLAY_TEXT_LEN", 0, min_val=0, max_val=2000000)
 
 _RAW_ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
 ALLOWED_ORIGINS: list[str] = (
@@ -450,6 +460,42 @@ def _is_audit_or_admin_log(src_ip: str, raw_text: str, user_agent: str = "") -> 
         return True
 
     return False
+
+
+# ==========================================
+# IP 抽出・.txt 保存ヘルパー
+# ==========================================
+def collect_detected_ips(payload: dict[str, Any]) -> list[str]:
+    """集計結果から重複なしの公開IPv4リスト（出現数降順・同数は昇順）を作成する。"""
+    ip_counts: Counter[str] = Counter()
+
+    for ev in payload.get("timeline") or []:
+        if isinstance(ev, dict):
+            ip = str(ev.get("ip") or "").strip()
+            if is_public_ipv4(ip):
+                ip_counts[ip] += 1
+
+    if not ip_counts:
+        for item in payload.get("top_ips") or []:
+            if isinstance(item, dict):
+                ip = str(item.get("ip") or "").strip()
+                if is_public_ipv4(ip):
+                    ip_counts[ip] += max(1, _safe_int(item.get("count"), 1))
+
+    return [ip for ip, _ in sorted(ip_counts.items(), key=lambda x: (-x[1], x[0]))]
+
+
+def _save_ips_txt_if_enabled(ips: list[str]) -> Path | None:
+    if not SAVE_IPS_TXT:
+        return None
+    try:
+        IPS_TXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        content = "\n".join(ips) + ("\n" if ips else "")
+        IPS_TXT_PATH.write_text(content, encoding="utf-8")
+        return IPS_TXT_PATH
+    except OSError as exc:
+        logger.warning("Failed to write IP list to %s: %s", IPS_TXT_PATH, exc)
+        return None
 
 
 # ==========================================
@@ -1469,9 +1515,9 @@ def _build_record_from_dict_and_meta(
     )
     path = sanitize_display_text(
         target_dict.get("path") or http_req.get("requestUrl") or "/",
-        max_len=1000,
+        max_len=4000,
     )
-    raw_req_line = sanitize_display_text(target_dict.get("raw_request_line") or "", max_len=1000).strip()
+    raw_req_line = sanitize_display_text(target_dict.get("raw_request_line") or "", max_len=4000).strip()
     body_val = (
         target_dict.get("payload")
         or target_dict.get("body")
@@ -1494,14 +1540,16 @@ def _build_record_from_dict_and_meta(
         payload_str = full_json_str
 
     payload_safe = sanitize_display_text(payload_str)
+    payload_full = sanitize_display_text(payload_str, max_len=0)
     pretty_json_safe = sanitize_display_text(pretty_json_str)
+    pretty_json_full = sanitize_display_text(pretty_json_str, max_len=0)
     ua = _extract_user_agent(target_dict, http_req)
     header_cnt = (
         len(headers_obj)
         if isinstance(headers_obj, dict)
         else _safe_int(target_dict.get("header_count", 6), 6)
     )
-    raw_text_for_filter = f"{event_type} {path} {payload_safe} {ua}"
+    raw_text_for_filter = f"{event_type} {path} {payload_full} {ua}"
 
     if _should_skip_record(src_ip, event_type, ua, path, raw_text_for_filter):
         return None
@@ -1519,9 +1567,11 @@ def _build_record_from_dict_and_meta(
         "method": method,
         "path": path,
         "payload": payload_safe,
+        "payload_full": payload_full,
         "raw_json": full_json_obj,
         "raw_json_str": payload_safe,
         "raw_json_pretty": pretty_json_safe,
+        "raw_json_pretty_full": pretty_json_full,
         "raw_request_line": raw_req_line,
         "user_agent": ua,
         "header_count": header_cnt,
@@ -1572,11 +1622,13 @@ def _obj_to_record(
         )
 
     if isinstance(obj, str) and obj.strip() and (cutoff_dt is None or blob_updated >= cutoff_dt):
-        line = sanitize_display_text(obj.strip())
-        src_ip = _extract_first_ipv4(line) or "private"
-        if _should_skip_record(src_ip, "text", "", "/", line):
+        line_full = sanitize_display_text(obj.strip(), max_len=0)
+        line_safe = sanitize_display_text(obj.strip())
+        src_ip = _extract_first_ipv4(line_full) or "private"
+        if _should_skip_record(src_ip, "text", "", "/", line_full):
             return None
-        raw_obj = {"event": "text", "message": line, "timestamp": blob_updated.isoformat()}
+        raw_obj = {"event": "text", "message": line_full, "timestamp": blob_updated.isoformat()}
+        pretty_full = _safe_json_dumps(raw_obj, indent=2)
         return {
             "timestamp": blob_updated.isoformat(),
             "insert_id": "",
@@ -1585,14 +1637,16 @@ def _obj_to_record(
             "ip": src_ip,
             "method": "GET",
             "path": "/",
-            "payload": line,
+            "payload": line_safe,
+            "payload_full": line_full,
             "raw_json": raw_obj,
             "raw_json_str": _safe_json_dumps(raw_obj),
-            "raw_json_pretty": _safe_json_dumps(raw_obj, indent=2),
+            "raw_json_pretty": sanitize_display_text(pretty_full),
+            "raw_json_pretty_full": pretty_full,
             "raw_request_line": "",
             "user_agent": "",
             "header_count": 6,
-            "bytes": len(line.encode("utf-8")) + 160,
+            "bytes": len(line_full.encode("utf-8")) + 160,
         }
 
     return None
@@ -1862,7 +1916,7 @@ def _record_dedup_key(rec: dict[str, Any]) -> str:
     insert_id = str(rec.get("insert_id") or "").strip()
     if insert_id:
         return f"iid:{insert_id}"
-    payload_digest = hashlib.sha256(str(rec.get("payload") or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+    payload_digest = hashlib.sha256(str(rec.get("payload_full") or rec.get("payload") or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
     return f"ts:{rec.get('timestamp')}|ip:{rec.get('ip')}|m:{rec.get('method')}|p:{rec.get('path')}|h:{payload_digest}"
 
 
@@ -1940,7 +1994,7 @@ def _compute_right_side_analytics(
     hour_counter: Counter[str] = Counter()
 
     for ev in timeline_events:
-        raw_blob = f"{ev.get('path') or ''} {ev.get('payload') or ''}".lower()
+        raw_blob = f"{ev.get('path') or ''} {ev.get('payload_full') or ev.get('payload') or ''}".lower()
         method = str(ev.get("method") or "GET").upper()
         clean_path = str(ev.get("path") or "/").split("?")[0]
         path_counter[f"{method} {clean_path[:60]}"] += 1
@@ -2043,6 +2097,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         cached_at, cached_payload = cached
         if (now_mono - cached_at) < LOG_CACHE_TTL:
             LOG_RESPONSE_CACHE.move_to_end(cache_key)
+            _save_ips_txt_if_enabled(collect_detected_ips(cached_payload))
             return cached_payload
 
     raw_records, is_demo_mode = await fetch_logs_async(hours=effective_hours, limit=effective_limit)
@@ -2055,11 +2110,11 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         ip = rec["ip"]
         geo = _normalize_geo_entry(geo_map.get(ip), ip=ip)
 
-        if _is_audit_or_admin_log(ip, rec.get("payload", ""), rec.get("user_agent", "")):
+        if _is_audit_or_admin_log(ip, rec.get("payload_full") or rec.get("payload", ""), rec.get("user_agent", "")):
             continue
         if SKIP_PRIVATE_IPS and _is_private_or_non_public_ip(ip, geo):
             continue
-        if SKIP_GOOGLE_LLC and _is_google_llc(geo, rec.get("user_agent", ""), rec.get("payload", "")):
+        if SKIP_GOOGLE_LLC and _is_google_llc(geo, rec.get("user_agent", ""), rec.get("payload_full") or rec.get("payload", "")):
             continue
         if SKIP_JAPAN_IPS and _is_japan_geo(geo):
             continue
@@ -2068,7 +2123,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             event_type=rec.get("event_type", "request"),
             method=rec["method"],
             path=rec["path"],
-            payload=rec["payload"],
+            payload=rec.get("payload_full") or rec["payload"],
             user_agent=rec["user_agent"],
             raw_request_line=rec.get("raw_request_line", ""),
             header_count=rec["header_count"],
@@ -2157,9 +2212,14 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         )["count"] += 1
 
         if len(timeline_events) < min(MAX_TIMELINE_EVENTS, effective_limit):
-            safe_path = sanitize_display_text(rec["path"])
-            safe_payload = sanitize_display_text(rec["payload"])
-            safe_pretty = sanitize_display_text(rec.get("raw_json_pretty") or safe_payload)
+            safe_path = sanitize_display_text(rec["path"], max_len=0)
+            safe_payload = sanitize_display_text(rec["payload"], max_len=0)
+            safe_payload_full = sanitize_display_text(rec.get("payload_full") or rec["payload"], max_len=0)
+            safe_pretty = sanitize_display_text(rec.get("raw_json_pretty") or safe_payload, max_len=0)
+            safe_pretty_full = sanitize_display_text(
+                rec.get("raw_json_pretty_full") or rec.get("raw_json_pretty") or safe_payload_full,
+                max_len=0,
+            )
             event_id = sanitize_display_text(
                 f"{rec['timestamp']}_{len(timeline_events)}_{ip}_{rec['method']}_{safe_path[:120]}"
             )
@@ -2177,8 +2237,10 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                 "method": rec["method"],
                 "path": safe_path,
                 "payload": safe_payload,
+                "payload_full": safe_payload_full,
                 "raw_json": rec.get("raw_json"),
                 "raw_json_pretty": safe_pretty,
+                "raw_json_pretty_full": safe_pretty_full,
                 "category": category,
                 "confidence": confidence,
                 "anomaly_score": anomaly_score,
@@ -2207,6 +2269,7 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
                     "cluster_label": cluster_label,
                     "json": rec.get("raw_json"),
                     "json_pretty": safe_pretty,
+                    "json_pretty_full": safe_pretty_full,
                 }
             )
 
@@ -2246,6 +2309,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
         "cost": calculate_gcp_costs(len(timeline_events), total_bytes, effective_hours),
     }
 
+    _save_ips_txt_if_enabled(collect_detected_ips(payload))
+
     LOG_RESPONSE_CACHE[cache_key] = (time.monotonic(), payload)
     LOG_RESPONSE_CACHE.move_to_end(cache_key)
     while len(LOG_RESPONSE_CACHE) > MAX_LOG_CACHE_ENTRIES:
@@ -2255,6 +2320,8 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    os.environ.setdefault("GRPC_VERBOSITY", os.getenv("GRPC_VERBOSITY", "ERROR").strip() or "ERROR")
+    os.environ.setdefault("GRPC_TRACE", os.getenv("GRPC_TRACE", "").strip())
     try:
         init_ml_models()
     except Exception as exc:
@@ -2372,6 +2439,27 @@ async def get_stats(
     return await build_stats_payload(hours=safe_hours, limit=safe_limit)
 
 
+@app.get("/api/export/ips.txt")
+async def export_ips_txt(
+    hours: int = Query(default=8760, ge=1, le=87600),
+    limit: int = Query(default=10000, ge=1, le=50000),
+) -> Response:
+    safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    payload = await build_stats_payload(hours=safe_hours, limit=safe_limit)
+    ips = collect_detected_ips(payload)
+    txt_body = "\n".join(ips) + ("\n" if ips else "")
+    filename = f"detected_ips_{safe_hours}h.txt"
+    return Response(
+        content=txt_body.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @app.get("/api/stream")
 async def stream_stats(
     request: Request,
@@ -2417,3 +2505,93 @@ async def stream_stats(
 @app.get("/environment.html")
 async def serve_environment() -> FileResponse:
     return FileResponse(_resolve_static_file("environment.html"))
+
+def fetch_attacks_from_gcp(
+    hours: int = 8760,
+    limit: int = 10000,
+    source_mode: str | None = None,
+    out_ips: Path | None = None,
+    out_attacks: Path | None = None,
+) -> dict[str, Any]:
+    """Cloud Logging / GCS / BigQuery から攻撃ログを取得・分析し、IPと攻撃データを保存する。"""
+    global LOG_SOURCE_MODE
+    prev_mode = LOG_SOURCE_MODE
+    if source_mode:
+        LOG_SOURCE_MODE = source_mode.strip().lower()
+    try:
+        init_ml_models()
+        payload = asyncio.run(build_stats_payload(hours=hours, limit=limit))
+    finally:
+        LOG_SOURCE_MODE = prev_mode
+
+    ips = collect_detected_ips(payload)
+    target_ips_path = out_ips or IPS_TXT_PATH
+    target_ips_path.parent.mkdir(parents=True, exist_ok=True)
+    target_ips_path.write_text("\n".join(ips) + ("\n" if ips else ""), encoding="utf-8")
+
+    if out_attacks is not None:
+        out_attacks.parent.mkdir(parents=True, exist_ok=True)
+        events = payload.get("timeline") or []
+        out_attacks.write_text(
+            "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in events)
+            + ("\n" if events else ""),
+            encoding="utf-8",
+        )
+
+    return {
+        "ips": ips,
+        "ips_path": str(target_ips_path),
+        "attacks_path": str(out_attacks) if out_attacks else None,
+        "payload": payload,
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Cloud Logging / GCS / BigQuery から攻撃ログと攻撃元IPを取得して保存"
+    )
+    parser.add_argument("--hours", type=int, default=8760, help="取得対象の時間幅（既定: 8760）")
+    parser.add_argument("--limit", type=int, default=10000, help="最大取得件数（既定: 10000）")
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        choices=["all", "both", "logging", "gcs", "bigquery"],
+        help="取得元（未指定時は LOG_SOURCE_MODE を使用）",
+    )
+    parser.add_argument(
+        "--out-ips",
+        type=str,
+        default=str(IPS_TXT_PATH),
+        help="抽出した攻撃元IPを保存する .txt ファイルパス",
+    )
+    parser.add_argument(
+        "--out-attacks",
+        type=str,
+        default="detected_attacks.jsonl",
+        help="抽出した攻撃ログを保存する .jsonl ファイルパス（空文字で保存しない）",
+    )
+    args = parser.parse_args()
+
+    attacks_file = Path(args.out_attacks) if args.out_attacks.strip() else None
+    result = fetch_attacks_from_gcp(
+        hours=args.hours,
+        limit=args.limit,
+        source_mode=args.source,
+        out_ips=Path(args.out_ips),
+        out_attacks=attacks_file,
+    )
+    pl = result["payload"]
+    summary = pl.get("summary") or {}
+    print(f"攻撃イベント数: {summary.get('total_attacks', 0)} 件")
+    print(f"ユニーク攻撃元IP数: {len(result['ips'])} 件 -> {result['ips_path']}")
+    if result["attacks_path"]:
+        print(f"攻撃ログ保存先: {result['attacks_path']}")
+    for ev in (pl.get("timeline") or [])[:10]:
+        print(
+            f"  [{ev.get('timestamp')}] {ev.get('flag', '')} {ev.get('country', '')} "
+            f"{ev.get('ip')} | {ev.get('category')} ({ev.get('anomaly_score')}%) | "
+            f"{ev.get('method')} {ev.get('path')}"
+        )
