@@ -1,4 +1,3 @@
-let categoryChart = null;
 let eventSource = null;
 let isStreamPaused = false;
 let seenEventIds = new Set();
@@ -8,20 +7,19 @@ let renderRafId = null;
 
 const EXCLUDE_GOOGLE_AND_PRIVATE = true;
 const MAX_SEEN_EVENT_IDS = 100000;
-const ALLOWED_HOURS = new Set([1, 6, 12, 24, 72, 168, 720, 8760]);
-const ALLOWED_LIMITS = new Set([200, 500, 1000, 2000, 5000, 10000]);
+const ALLOWED_HOURS = new Set([1, 6, 24, 168, 8760]);
+const ALLOWED_LIMITS = new Set([200, 1000, 2000, 10000]);
 const DEFAULT_LIMIT = 2000;
 const MAX_LIMIT = 10000;
 const RECONNECT_BASE_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 let reconnectTimerId = null;
 let reconnectAttempt = 0;
+
 const ALLOWED_BADGE_CLASSES = new Set([
   "badge-danger",
-  "badge-purple",
   "badge-warning",
   "badge-info",
-  "badge-success",
 ]);
 
 function readStoredLang() {
@@ -37,7 +35,7 @@ function writeStoredLang(lang) {
   try {
     localStorage.setItem("honeypot_lang", lang);
   } catch (_) {
-    // ストレージ利用不可時は無視
+    // 無視
   }
 }
 
@@ -45,147 +43,71 @@ let currentLang = readStoredLang();
 
 const I18N = {
   ja: {
-    nav_dashboard: "ダッシュボード",
-    nav_env: "開発環境・構成",
-    back_to_dash: "← ダッシュボードへ戻る",
-    period_label: "集計期間:",
-    period_1h: "直近 1時間",
-    period_6h: "直近 6時間",
-    period_12h: "直近 12時間",
-    period_24h: "直近 24時間",
-    period_72h: "直近 3日間",
-    period_168h: "直近 7日間",
-    period_30d: "直近 30日間",
-    period_all: "全期間 (All)",
-    limit_label: "件数上限:",
+    nav_dashboard: "ログ",
+    nav_env: "構成",
+    period_1h: "1時間",
+    period_6h: "6時間",
+    period_24h: "24時間",
+    period_168h: "7日間",
+    period_all: "全期間",
     limit_200: "200件",
-    limit_500: "500件",
     limit_1000: "1,000件",
     limit_2000: "2,000件",
-    limit_5000: "5,000件",
     limit_10000: "10,000件",
-    pause_btn: "一時停止",
+    pause_btn: "停止",
     resume_btn: "再開",
-    refresh_btn: "即時取得",
-    export_ips_btn: "IP .txt 保存",
-    export_jsonl_btn: "攻撃ログ .jsonl 保存",
-    connecting: "ストリーム接続中...",
+    refresh_btn: "更新",
+    connecting: "接続中...",
     fetch_error: "取得エラー",
-    kpi_total: "総検知イベント数 (異常度≥80%)",
-    kpi_total_sub: "高異常度攻撃ログを表示中",
-    kpi_ips: "攻撃元ユニークIP",
-    kpi_anomaly: "高異常度アラート (≥80%)",
-    kpi_anomaly_sub: "Isolation Forest + 教師なしクラスタ",
-    kpi_cost: "GCP 月間推定コスト",
-    country_panel_title: "観測国・国旗一覧",
-    country_panel_sub: "IPから解決した国名・国旗",
-    no_countries: "表示対象の国データがありません",
-    chart_title: "ML 攻撃カテゴリ分布",
-    analytics_panel_title: "右側分析サマリー（クラスタ・攻撃手口・標的パス）",
-    analytics_panel_sub: "教師なしクラスタリング & 異常度≥80%詳細",
-    clusters_title: "教師なしクラスタ分布",
-    tactics_title: "主な攻撃手口 (Top 6)",
-    paths_title: "標的エンドポイント (Top 6)",
-    high80_title: "高異常度イベント抜粋 (≥80%)",
-    no_analytics_data: "集計対象データがありません",
-    country_rank_title: "国別攻撃ランキング (Top 10)",
-    ip_rank_title: "攻撃元 IP / ISP ランキング (Top 10)",
-    th_rank: "順位",
-    th_country: "国・地域",
-    th_count: "検知数",
-    th_ip: "IPアドレス",
-    th_isp: "ISP / 組織",
-    th_tactic: "主な手口",
-    th_times: "回数",
-    stream_title: "リアルタイム攻撃検知ストリーム（攻撃内容・ML/統計根拠付き）",
-    search_placeholder: "IP・国・ISP・クラスタ・攻撃内容・ペイロードで検索（例: 91.92.40.12）",
+    kpi_total: "検知件数",
+    kpi_ips: "ユニークIP",
+    kpi_anomaly: "高異常度 (≥80%)",
+    kpi_cost: "推定月額コスト",
+    no_countries: "国データなし",
+    search_placeholder: "IP・国・内容で検索...",
     clear_btn: "クリア",
-    sse_note: "SSE プッシュ配信（3秒間隔）",
-    th_time: "時刻 (UTC)",
-    th_source: "攻撃元",
-    th_ml: "ML分類 / クラスタ",
-    th_anomaly: "AI異常度",
-    th_payload: "攻撃内容・分析根拠・ペイロード詳細",
-    countries_observed: (n) => `${n} ヶ国から観測`,
-    quota_label: (pct) => `Logging無料枠消化率: ${pct}%`,
-    updated_label: (t) => `リアルタイム受信: ${t}`,
-    filtered_label: (shown, total) => `表示中: ${shown} / ${total} 件`,
-    all_label: (total) => `全 ${total} 件`,
-    ip_row_title: "クリックでこのIPをストリーム検索",
-    country_chip_title: "クリックでこの国をストリーム検索",
-    cluster_chip_title: "クリックでこのクラスタをストリーム検索",
+    th_time: "時刻",
+    th_source: "送信元",
+    th_anomaly: "異常度",
+    th_payload: "攻撃内容",
+    detail_open: "JSON",
+    updated_label: (t) => t,
+    filtered_label: (shown, total) => `${shown}/${total}件`,
+    all_label: (total) => `${total}件`,
     unit_count: "件",
   },
   en: {
-    nav_dashboard: "Dashboard",
-    nav_env: "Dev Env & Stack",
-    back_to_dash: "← Back to Dashboard",
-    period_label: "Window:",
-    period_1h: "Last 1 Hour",
-    period_6h: "Last 6 Hours",
-    period_12h: "Last 12 Hours",
-    period_24h: "Last 24 Hours",
-    period_72h: "Last 3 Days",
-    period_168h: "Last 7 Days",
-    period_30d: "Last 30 Days",
-    period_all: "All History",
-    limit_label: "Limit:",
-    limit_200: "200 rows",
-    limit_500: "500 rows",
-    limit_1000: "1,000 rows",
-    limit_2000: "2,000 rows",
-    limit_5000: "5,000 rows",
-    limit_10000: "10,000 rows",
+    nav_dashboard: "Logs",
+    nav_env: "Stack",
+    period_1h: "1h",
+    period_6h: "6h",
+    period_24h: "24h",
+    period_168h: "7d",
+    period_all: "All",
+    limit_200: "200",
+    limit_1000: "1,000",
+    limit_2000: "2,000",
+    limit_10000: "10,000",
     pause_btn: "Pause",
     resume_btn: "Resume",
-    refresh_btn: "Refresh Now",
-    export_ips_btn: "Save IP .txt",
-    export_jsonl_btn: "Save Logs .jsonl",
-    connecting: "Connecting stream...",
-    fetch_error: "Fetch error",
-    kpi_total: "Total Detected Events (≥80%)",
-    kpi_total_sub: "Showing high-anomaly attack logs",
-    kpi_ips: "Unique Source IPs",
-    kpi_anomaly: "High Anomaly Alerts (≥80%)",
-    kpi_anomaly_sub: "Isolation Forest + Unsupervised Clusters",
-    kpi_cost: "Est. Monthly GCP Cost",
-    country_panel_title: "Observed Countries & Flags",
-    country_panel_sub: "Flags & country names resolved from IPs",
-    no_countries: "No country data available",
-    chart_title: "ML Attack Categories",
-    analytics_panel_title: "Analytics Summary (Clusters, Tactics & Target Paths)",
-    analytics_panel_sub: "Unsupervised Clustering & Anomaly ≥80% Details",
-    clusters_title: "Unsupervised Clusters",
-    tactics_title: "Top Attack Tactics (Top 6)",
-    paths_title: "Top Target Endpoints (Top 6)",
-    high80_title: "High Anomaly Events (≥80%)",
-    no_analytics_data: "No analytics data available",
-    country_rank_title: "Top Countries (Top 10)",
-    ip_rank_title: "Top Source IPs / ISPs (Top 10)",
-    th_rank: "Rank",
-    th_country: "Country / Region",
-    th_count: "Events",
-    th_ip: "IP Address",
-    th_isp: "ISP / Organization",
-    th_tactic: "Top Tactic",
-    th_times: "Hits",
-    stream_title: "Live Attack Detection Stream (With Attack Summary & ML/Stats Basis)",
-    search_placeholder: "Filter by IP, country, ISP, cluster, summary, or payload",
+    refresh_btn: "Refresh",
+    connecting: "Connecting...",
+    fetch_error: "Error",
+    kpi_total: "Events",
+    kpi_ips: "Unique IPs",
+    kpi_anomaly: "High (≥80%)",
+    kpi_cost: "Est. Monthly",
+    no_countries: "No countries",
+    search_placeholder: "Search IP, country, summary...",
     clear_btn: "Clear",
-    sse_note: "SSE push stream (3s interval)",
-    th_time: "Time (UTC)",
+    th_time: "Time",
     th_source: "Source",
-    th_ml: "ML Class / Cluster",
-    th_anomaly: "Anomaly",
-    th_payload: "Attack Summary, Analysis Basis & Payload",
-    countries_observed: (n) => `Observed across ${n} ${n === 1 ? "country" : "countries"}`,
-    quota_label: (pct) => `Logging free tier usage: ${pct}%`,
-    updated_label: (t) => `Live update: ${t}`,
-    filtered_label: (shown, total) => `Showing: ${shown} / ${total}`,
-    all_label: (total) => `Total: ${total}`,
-    ip_row_title: "Click to filter stream by this IP",
-    country_chip_title: "Click to filter stream by this country",
-    cluster_chip_title: "Click to filter stream by this cluster",
+    th_anomaly: "Score",
+    th_payload: "Summary",
+    detail_open: "JSON",
+    updated_label: (t) => t,
+    filtered_label: (shown, total) => `${shown}/${total}`,
+    all_label: (total) => `${total}`,
     unit_count: "",
   },
 };
@@ -194,7 +116,6 @@ function t(key) {
   return I18N[currentLang]?.[key] ?? I18N.ja[key] ?? key;
 }
 
-// maxLen <= 0 のときは省略なしで全文を返す
 function sanitizeText(val, fallback = "", maxLen = 0) {
   if (val === null || val === undefined) return fallback;
   const cleaned = String(val).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
@@ -234,17 +155,13 @@ function syncExportLinks() {
   const limit = getClampedLimit();
   const query = `hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`;
 
-  const ipsLink =
-    document.getElementById("export-ips-link") ||
-    document.getElementById("export-ips-btn");
-  if (ipsLink) {
-    ipsLink.setAttribute("href", `/api/export/ips.txt?${query}`);
-    ipsLink.setAttribute("download", `detected_ips_${hours}h.txt`);
+  const logLink = document.getElementById("export-log-btn");
+  if (logLink) {
+    logLink.setAttribute("href", `/api/export/log.txt?${query}`);
+    logLink.setAttribute("download", `log_${hours}h.txt`);
   }
 
-  const jsonlLink =
-    document.getElementById("export-jsonl-link") ||
-    document.getElementById("export-jsonl-btn");
+  const jsonlLink = document.getElementById("export-jsonl-btn");
   if (jsonlLink) {
     jsonlLink.setAttribute("href", `/api/export/attacks.jsonl?${query}`);
     jsonlLink.setAttribute("download", `detected_attacks_${hours}h.jsonl`);
@@ -253,9 +170,7 @@ function syncExportLinks() {
 
 function createTextEl(tagName, text, className = "") {
   const el = document.createElement(tagName);
-  if (className) {
-    el.className = className;
-  }
+  if (className) el.className = className;
   el.textContent = toSafeText(text);
   return el;
 }
@@ -273,18 +188,10 @@ function isPublicIpv4Str(ip) {
 }
 
 function isGoogleOrPrivateEntry(entry) {
-  if (!EXCLUDE_GOOGLE_AND_PRIVATE || !entry || typeof entry !== "object") {
-    return false;
-  }
+  if (!EXCLUDE_GOOGLE_AND_PRIVATE || !entry || typeof entry !== "object") return false;
   const ip = toSafeText(entry.ip, "", 64).trim().toLowerCase();
-  if (!ip || ip === "private" || ip === "unknown" || !isPublicIpv4Str(ip)) {
-    return true;
-  }
-
-  const isp = toSafeText(entry.isp).toLowerCase();
-  if (isp.includes("google")) {
-    return true;
-  }
+  if (!ip || ip === "private" || ip === "unknown" || !isPublicIpv4Str(ip)) return true;
+  if (toSafeText(entry.isp).toLowerCase().includes("google")) return true;
 
   const country = toSafeText(entry.country).toLowerCase();
   const countryJa = toSafeText(entry.country_ja).trim();
@@ -296,21 +203,11 @@ function isGoogleOrPrivateEntry(entry) {
   ) {
     return true;
   }
-
   return false;
 }
 
 function getSafeBadgeClass(candidate) {
   return ALLOWED_BADGE_CLASSES.has(candidate) ? candidate : "badge-info";
-}
-
-function getCategoryBadgeClass(category) {
-  const cat = toSafeText(category);
-  if (cat.includes("RCE")) return getSafeBadgeClass("badge-danger");
-  if (cat.includes("Credential")) return getSafeBadgeClass("badge-purple");
-  if (cat.includes("SQLi") || cat.includes("XSS")) return getSafeBadgeClass("badge-warning");
-  if (cat.includes("Brute")) return getSafeBadgeClass("badge-info");
-  return getSafeBadgeClass("badge-success");
 }
 
 function getAnomalyBadgeClass(score) {
@@ -330,10 +227,12 @@ function getCountryLabel(item) {
 
 function getAttackSummaryText(ev) {
   if (!ev || typeof ev !== "object") return "";
-  if (currentLang === "en") {
-    return toSafeText(ev.attack_summary_en || ev.attack_summary, "", 500);
-  }
-  return toSafeText(ev.attack_summary || ev.attack_summary_en, "", 500);
+  const summary =
+    currentLang === "en"
+      ? toSafeText(ev.attack_summary_en || ev.attack_summary, "", 300)
+      : toSafeText(ev.attack_summary || ev.attack_summary_en, "", 300);
+  if (summary) return summary;
+  return `${toSafeText(ev.method, "GET")} ${toSafeText(ev.path, "/")}`;
 }
 
 function getFullRequestDetailText(ev) {
@@ -344,25 +243,17 @@ function getFullRequestDetailText(ev) {
   const prettyFull = toSafeText(ev.raw_json_pretty_full || ev.raw_json_pretty || "");
 
   const parts = [`${methodStr} ${pathStr}`];
-  if (fullPayload) {
-    parts.push(fullPayload);
-  }
-  if (prettyFull) {
-    parts.push(`--- JSON (FULL) ---\n${prettyFull}`);
-  }
+  if (fullPayload) parts.push(fullPayload);
+  if (prettyFull) parts.push(prettyFull);
   return parts.join("\n");
 }
 
 function applySearchFilter(queryText) {
   const input = document.getElementById("ip-search-input");
   const normalized = sanitizeText(queryText || "", "", 200);
-  if (input) {
-    input.value = normalized;
-  }
+  if (input) input.value = normalized;
   searchQuery = normalized;
-  if (latestData) {
-    scheduleRenderTables(latestData);
-  }
+  if (latestData) scheduleRenderTimeline(latestData);
 }
 
 function applyLanguage(lang) {
@@ -373,20 +264,14 @@ function applyLanguage(lang) {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const k = el.getAttribute("data-i18n");
     const val = t(k);
-    if (typeof val === "string") {
-      el.textContent = val;
-    }
+    if (typeof val === "string") el.textContent = val;
   });
 
   const searchInput = document.getElementById("ip-search-input");
-  if (searchInput) {
-    searchInput.placeholder = t("search_placeholder");
-  }
+  if (searchInput) searchInput.placeholder = t("search_placeholder");
 
   const toggleBtn = document.getElementById("toggle-stream-btn");
-  if (toggleBtn) {
-    toggleBtn.textContent = isStreamPaused ? t("resume_btn") : t("pause_btn");
-  }
+  if (toggleBtn) toggleBtn.textContent = isStreamPaused ? t("resume_btn") : t("pause_btn");
 
   const jaBtn = document.getElementById("lang-ja-btn");
   const enBtn = document.getElementById("lang-en-btn");
@@ -398,16 +283,40 @@ function applyLanguage(lang) {
     enBtn.setAttribute("aria-pressed", String(!isJa));
   }
 
-  const envJa = document.getElementById("env-content-ja");
-  const envEn = document.getElementById("env-content-en");
-  if (envJa && envEn) {
-    envJa.style.display = currentLang === "ja" ? "flex" : "none";
-    envEn.style.display = currentLang === "en" ? "flex" : "none";
-  }
+  if (latestData) applyDashboardData(latestData);
+}
 
-  if (latestData) {
-    applyDashboardData(latestData);
-  }
+function getAllObservedTimeline(timeline) {
+  if (!Array.isArray(timeline)) return [];
+  return timeline.filter((ev) => ev && typeof ev === "object" && !isGoogleOrPrivateEntry(ev));
+}
+
+function getFilteredTimeline(timeline) {
+  const baseList = getAllObservedTimeline(timeline);
+  const q = searchQuery.trim().toLowerCase();
+  if (!q) return baseList;
+
+  return baseList.filter((ev) => {
+    const haystack = [
+      ev.ip,
+      ev.country,
+      ev.country_ja,
+      ev.country_en,
+      ev.category,
+      ev.attack_summary,
+      ev.attack_summary_en,
+      ev.method,
+      ev.path,
+      ev.payload_full,
+      ev.payload,
+      ev.timestamp,
+    ]
+      .filter((v) => v !== null && v !== undefined)
+      .map((v) => sanitizeText(v, ""))
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(q);
+  });
 }
 
 function renderCountryFlagsList(topCountries, timeline) {
@@ -438,9 +347,9 @@ function renderCountryFlagsList(topCountries, timeline) {
       if (!prev) {
         aggregated.set(key, {
           flag: toSafeText(item.flag, "🌐", 16),
-          country: toSafeText(item.country, "Unknown", 100),
           country_ja: countryJa,
           country_en: countryEn,
+          country: toSafeText(item.country, "Unknown", 100),
           count,
         });
       } else {
@@ -458,9 +367,9 @@ function renderCountryFlagsList(topCountries, timeline) {
       if (!prev) {
         aggregated.set(key, {
           flag: toSafeText(ev.flag, "🌐", 16),
-          country: toSafeText(ev.country, "Unknown", 100),
           country_ja: countryJa,
           country_en: countryEn,
+          country: toSafeText(ev.country, "Unknown", 100),
           count: 1,
         });
       } else {
@@ -473,7 +382,7 @@ function renderCountryFlagsList(topCountries, timeline) {
   const fragment = document.createDocumentFragment();
 
   if (list.length === 0) {
-    fragment.appendChild(createTextEl("p", t("no_countries"), "muted"));
+    fragment.appendChild(createTextEl("span", t("no_countries"), "muted"));
     container.replaceChildren(fragment);
     return;
   }
@@ -485,12 +394,11 @@ function renderCountryFlagsList(topCountries, timeline) {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "country-flag-chip";
-    chip.title = t("country_chip_title");
 
     const labelText = getCountryLabel(item);
     const unit = t("unit_count");
     chip.appendChild(createTextEl("span", toSafeText(item.flag, "🌐", 16), "country-flag-icon"));
-    chip.appendChild(createTextEl("span", labelText, "country-flag-name"));
+    chip.appendChild(createTextEl("span", labelText));
     chip.appendChild(
       createTextEl(
         "span",
@@ -500,306 +408,13 @@ function renderCountryFlagsList(topCountries, timeline) {
     );
 
     chip.addEventListener("click", () => {
-      applySearchFilter(labelText);
+      applySearchFilter(searchQuery === labelText ? "" : labelText);
     });
-
     grid.appendChild(chip);
   });
 
   fragment.appendChild(grid);
   container.replaceChildren(fragment);
-}
-
-function renderRightAnalytics(rightAnalytics) {
-  const panel = document.getElementById("right-analytics-panel");
-  if (!panel) return;
-
-  const ra = rightAnalytics && typeof rightAnalytics === "object" ? rightAnalytics : {};
-  const clusters = Array.isArray(ra.cluster_breakdown) ? ra.cluster_breakdown : [];
-  const tactics = Array.isArray(ra.top_tactics) ? ra.top_tactics : [];
-  const paths = Array.isArray(ra.top_paths) ? ra.top_paths : [];
-  const high80 = Array.isArray(ra.above_80_events) ? ra.above_80_events : [];
-
-  if (!clusters.length && !tactics.length && !paths.length && !high80.length) {
-    panel.replaceChildren(createTextEl("p", t("no_analytics_data"), "muted"));
-    return;
-  }
-
-  const grid = document.createElement("div");
-  grid.className = "arch-grid";
-
-  const clusterBox = document.createElement("div");
-  clusterBox.className = "arch-box";
-  clusterBox.appendChild(createTextEl("h3", t("clusters_title")));
-  if (clusters.length) {
-    const ul = document.createElement("ul");
-    clusters.slice(0, 6).forEach((cl) => {
-      const li = document.createElement("li");
-      const label = toSafeText(cl.label, "Cluster", 120);
-      const cnt = Number(cl.count) || 0;
-      const share = Number(cl.share_pct) || 0;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "country-flag-chip";
-      btn.title = t("cluster_chip_title");
-      btn.appendChild(createTextEl("span", label, "country-flag-name"));
-      btn.appendChild(createTextEl("span", `${cnt.toLocaleString()} (${share}%)`, "country-flag-count"));
-      btn.addEventListener("click", () => applySearchFilter(label));
-      li.appendChild(btn);
-      ul.appendChild(li);
-    });
-    clusterBox.appendChild(ul);
-  } else {
-    clusterBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
-  }
-  grid.appendChild(clusterBox);
-
-  const tacticBox = document.createElement("div");
-  tacticBox.className = "arch-box";
-  tacticBox.appendChild(createTextEl("h3", t("tactics_title")));
-  if (tactics.length) {
-    const ul = document.createElement("ul");
-    tactics.slice(0, 6).forEach((tc) => {
-      const li = document.createElement("li");
-      const name = toSafeText(tc.tactic, "Unknown", 120);
-      const cnt = Number(tc.count) || 0;
-      const share = Number(tc.share_pct) || 0;
-      li.textContent = `${name} — ${cnt.toLocaleString()} (${share}%)`;
-      ul.appendChild(li);
-    });
-    tacticBox.appendChild(ul);
-  } else {
-    tacticBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
-  }
-  grid.appendChild(tacticBox);
-
-  const pathBox = document.createElement("div");
-  pathBox.className = "arch-box";
-  pathBox.appendChild(createTextEl("h3", t("paths_title")));
-  if (paths.length) {
-    const ul = document.createElement("ul");
-    paths.slice(0, 6).forEach((p) => {
-      const li = document.createElement("li");
-      const ep = toSafeText(p.endpoint, "/", 200);
-      const cnt = Number(p.count) || 0;
-      li.appendChild(createTextEl("code", ep));
-      li.appendChild(document.createTextNode(` (${cnt.toLocaleString()})`));
-      ul.appendChild(li);
-    });
-    pathBox.appendChild(ul);
-  } else {
-    pathBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
-  }
-  grid.appendChild(pathBox);
-
-  const highBox = document.createElement("div");
-  highBox.className = "arch-box";
-  highBox.appendChild(createTextEl("h3", `${t("high80_title")} (${Number(ra.above_80_count) || 0})`));
-  if (high80.length) {
-    const ul = document.createElement("ul");
-    high80.slice(0, 5).forEach((ev) => {
-      const li = document.createElement("li");
-      const ip = toSafeText(ev.ip, "", 64);
-      const score = Number(ev.anomaly_score) || 0;
-      const sum = toSafeText(ev.attack_summary || ev.category, "", 200);
-      li.appendChild(createTextEl("code", ip));
-      li.appendChild(document.createTextNode(` [${score}%] ${sum}`));
-      ul.appendChild(li);
-    });
-    highBox.appendChild(ul);
-  } else {
-    highBox.appendChild(createTextEl("p", t("no_analytics_data"), "muted"));
-  }
-  grid.appendChild(highBox);
-
-  panel.replaceChildren(grid);
-}
-
-function updateCategoryChart(categories) {
-  const canvas = document.getElementById("category-chart");
-  if (!canvas || typeof Chart === "undefined") return;
-
-  const safeCategories =
-    categories && typeof categories === "object" ? categories : {};
-  const ctx = canvas.getContext("2d");
-  const labels = Object.keys(safeCategories).map((k) => toSafeText(k, "Unknown", 80));
-  const values = Object.values(safeCategories).map((v) => {
-    const num = Number(v);
-    return Number.isFinite(num) && num >= 0 ? num : 0;
-  });
-  const palette = ["#f43f5e", "#a855f7", "#f59e0b", "#38bdf8", "#10b981", "#64748b"];
-
-  if (categoryChart) {
-    categoryChart.data.labels = labels;
-    categoryChart.data.datasets[0].data = values;
-    categoryChart.data.datasets[0].backgroundColor = palette.slice(0, labels.length);
-    categoryChart.update("none");
-    return;
-  }
-
-  categoryChart = new Chart(ctx, {
-    type: "doughnut",
-    data: {
-      labels,
-      datasets: [
-        {
-          data: values,
-          backgroundColor: palette.slice(0, labels.length),
-          borderColor: "#131a2a",
-          borderWidth: 2,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: "bottom",
-          labels: {
-            color: "#e6edf7",
-            boxWidth: 12,
-            padding: 14,
-            font: { size: 12 },
-          },
-        },
-      },
-    },
-  });
-}
-
-function getAllObservedTimeline(timeline) {
-  if (!Array.isArray(timeline)) return [];
-  return timeline.filter(
-    (ev) => ev && typeof ev === "object" && !isGoogleOrPrivateEntry(ev)
-  );
-}
-
-function getFilteredTimeline(timeline) {
-  const baseList = getAllObservedTimeline(timeline);
-  const q = searchQuery.trim().toLowerCase();
-  if (!q) return baseList;
-
-  return baseList.filter((ev) => {
-    const haystack = [
-      ev.ip,
-      ev.country,
-      ev.country_ja,
-      ev.country_en,
-      ev.isp,
-      ev.category,
-      ev.attack_summary,
-      ev.attack_summary_en,
-      ev.analysis_basis,
-      ev.cluster_label,
-      ev.method,
-      ev.path,
-      ev.payload_full,
-      ev.payload,
-      ev.raw_json_pretty_full,
-      ev.raw_json_pretty,
-      ev.timestamp,
-    ]
-      .filter((v) => v !== null && v !== undefined)
-      .map((v) => sanitizeText(v, ""))
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(q);
-  });
-}
-
-function renderCountryTable(topCountries) {
-  const countryBody = document.getElementById("country-table-body");
-  if (!countryBody) return;
-
-  const items = (Array.isArray(topCountries) ? topCountries : []).filter((item) => {
-    if (!item || typeof item !== "object" || !EXCLUDE_GOOGLE_AND_PRIVATE) return true;
-    const country = toSafeText(item.country).toLowerCase();
-    const countryJa = toSafeText(item.country_ja).trim();
-    return (
-      !country.includes("private") &&
-      !country.includes("local") &&
-      !countryJa.includes("ローカル") &&
-      !countryJa.includes("プライベート")
-    );
-  });
-
-  const fragment = document.createDocumentFragment();
-  items.slice(0, 10).forEach((item, idx) => {
-    const tr = document.createElement("tr");
-
-    const tdRank = createTextEl("td", `#${idx + 1}`);
-    const tdCountry = createTextEl(
-      "td",
-      `${toSafeText(item.flag, "🌐", 16)} ${getCountryLabel(item)}`
-    );
-
-    const tdCount = document.createElement("td");
-    tdCount.className = "num";
-    const countNum = Number(item.count);
-    tdCount.appendChild(
-      createTextEl("strong", Number.isFinite(countNum) ? countNum.toLocaleString() : "0")
-    );
-
-    tr.appendChild(tdRank);
-    tr.appendChild(tdCountry);
-    tr.appendChild(tdCount);
-    fragment.appendChild(tr);
-  });
-
-  countryBody.replaceChildren(fragment);
-}
-
-function renderIpTable(topIps) {
-  const ipBody = document.getElementById("ip-table-body");
-  if (!ipBody) return;
-
-  const items = (Array.isArray(topIps) ? topIps : []).filter(
-    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
-  );
-
-  const fragment = document.createDocumentFragment();
-  items.slice(0, 10).forEach((item) => {
-    const ipStr = toSafeText(item.ip, "", 64);
-    const tr = document.createElement("tr");
-    tr.className = "clickable-ip-row";
-    tr.title = t("ip_row_title");
-
-    const tdIp = document.createElement("td");
-    tdIp.appendChild(createTextEl("code", ipStr));
-
-    const tdCountry = createTextEl(
-      "td",
-      `${toSafeText(item.flag, "🌐", 16)} ${getCountryLabel(item)}`
-    );
-    const tdIsp = createTextEl("td", toSafeText(item.isp, "Unknown ISP", 150));
-
-    const tdTactic = document.createElement("td");
-    const tacticStr = toSafeText(item.top_category, "Unknown", 80);
-    tdTactic.appendChild(
-      createTextEl("span", tacticStr, `badge ${getCategoryBadgeClass(tacticStr)}`)
-    );
-
-    const tdCount = document.createElement("td");
-    tdCount.className = "num";
-    const countNum = Number(item.count);
-    tdCount.appendChild(
-      createTextEl("strong", Number.isFinite(countNum) ? countNum.toLocaleString() : "0")
-    );
-
-    tr.addEventListener("click", () => {
-      applySearchFilter(ipStr);
-    });
-
-    tr.appendChild(tdIp);
-    tr.appendChild(tdCountry);
-    tr.appendChild(tdIsp);
-    tr.appendChild(tdTactic);
-    tr.appendChild(tdCount);
-    fragment.appendChild(tr);
-  });
-
-  ipBody.replaceChildren(fragment);
 }
 
 function renderTimelineTable(timeline) {
@@ -825,50 +440,30 @@ function renderTimelineTable(timeline) {
     const ipStr = toSafeText(ev.ip, "", 64);
     const pathStr = toSafeText(ev.path, "/");
     const methodStr = toSafeText(ev.method, "GET", 20);
-    const categoryStr = toSafeText(ev.category, "Unknown", 80);
-    const clusterStr = toSafeText(ev.cluster_label, "", 120);
     const summaryStr = getAttackSummaryText(ev);
-    const basisStr = toSafeText(ev.analysis_basis, "", 300);
     const scoreNum = Number(ev.anomaly_score);
     const safeScore = Number.isFinite(scoreNum)
       ? Math.max(0, Math.min(100, Math.round(scoreNum)))
       : 0;
 
     const evId = toSafeText(ev.id, "", 128) || `${tsStr}_${ipStr}_${methodStr}_${pathStr.slice(0, 80)}`;
-    if (nextSeen.size < MAX_SEEN_EVENT_IDS) {
-      nextSeen.add(evId);
-    }
+    if (nextSeen.size < MAX_SEEN_EVENT_IDS) nextSeen.add(evId);
 
     const isNew = trackNew && !seenEventIds.has(evId);
     const timeShort = tsStr.replace("T", " ").slice(0, 19);
     const fullDetailText = getFullRequestDetailText(ev);
 
     const tr = document.createElement("tr");
-    if (isNew) {
-      tr.className = "new-event-row";
-    }
+    if (isNew) tr.className = "new-event-row";
 
     const tdTime = document.createElement("td");
     tdTime.appendChild(createTextEl("code", timeShort));
 
     const tdSource = document.createElement("td");
     tdSource.appendChild(
-      document.createTextNode(
-        `${toSafeText(ev.flag, "🌐", 16)} ${getCountryLabel(ev)} `
-      )
+      document.createTextNode(`${toSafeText(ev.flag, "🌐", 16)} ${getCountryLabel(ev)} `)
     );
     tdSource.appendChild(createTextEl("code", ipStr));
-    tdSource.appendChild(document.createElement("br"));
-    tdSource.appendChild(createTextEl("span", toSafeText(ev.isp, "Unknown ISP", 150), "muted"));
-
-    const tdMl = document.createElement("td");
-    tdMl.appendChild(
-      createTextEl("span", categoryStr, `badge ${getCategoryBadgeClass(categoryStr)}`)
-    );
-    if (clusterStr) {
-      tdMl.appendChild(document.createElement("br"));
-      tdMl.appendChild(createTextEl("span", clusterStr, "muted"));
-    }
 
     const tdAnomaly = document.createElement("td");
     tdAnomaly.appendChild(
@@ -876,27 +471,21 @@ function renderTimelineTable(timeline) {
     );
 
     const tdPayload = document.createElement("td");
-    if (summaryStr) {
-      tdPayload.appendChild(createTextEl("strong", summaryStr, "attack-summary-text"));
-      tdPayload.appendChild(document.createElement("br"));
-    }
-    if (basisStr) {
-      tdPayload.appendChild(createTextEl("span", basisStr, "muted analysis-basis-text"));
-      tdPayload.appendChild(document.createElement("br"));
-    }
+    tdPayload.appendChild(createTextEl("div", summaryStr, "attack-summary-text"));
+
+    const detailsEl = document.createElement("details");
+    detailsEl.className = "payload-details";
+    const summaryEl = document.createElement("summary");
+    summaryEl.textContent = t("detail_open");
     const preEl = document.createElement("pre");
     preEl.className = "json-full-detail";
-    preEl.style.whiteSpace = "pre-wrap";
-    preEl.style.wordBreak = "break-all";
-    preEl.style.margin = "4px 0 0 0";
-    preEl.style.maxHeight = "none";
-    preEl.style.overflow = "visible";
     preEl.appendChild(createTextEl("code", fullDetailText));
-    tdPayload.appendChild(preEl);
+    detailsEl.appendChild(summaryEl);
+    detailsEl.appendChild(preEl);
+    tdPayload.appendChild(detailsEl);
 
     tr.appendChild(tdTime);
     tr.appendChild(tdSource);
-    tr.appendChild(tdMl);
     tr.appendChild(tdAnomaly);
     tr.appendChild(tdPayload);
     fragment.appendChild(tr);
@@ -906,49 +495,30 @@ function renderTimelineTable(timeline) {
   seenEventIds = nextSeen;
 }
 
-function renderTables(data) {
-  if (!data || typeof data !== "object") return;
-  renderCountryFlagsList(data.top_countries, data.timeline);
-  renderRightAnalytics(data.right_analytics);
-  renderCountryTable(data.top_countries);
-  renderIpTable(data.top_ips);
-  renderTimelineTable(data.timeline);
-}
-
-function scheduleRenderTables(data) {
-  if (renderRafId !== null) {
-    cancelAnimationFrame(renderRafId);
-  }
+function scheduleRenderTimeline(data) {
+  if (renderRafId !== null) cancelAnimationFrame(renderRafId);
   renderRafId = requestAnimationFrame(() => {
     renderRafId = null;
-    renderTables(data);
+    if (!data || typeof data !== "object") return;
+    renderCountryFlagsList(data.top_countries, data.timeline);
+    renderTimelineTable(data.timeline);
   });
 }
 
 function computeDerivedStats(data) {
   const observedTimeline = getAllObservedTimeline(data.timeline);
   const ipSet = new Set();
-  const countrySet = new Set();
-  const categories = {};
   let highAnomalyCount = 0;
 
   observedTimeline.forEach((ev) => {
     if (ev.ip) ipSet.add(toSafeText(ev.ip, "", 64));
-    const cLabel = toSafeText(ev.country_en || ev.country || ev.country_ja, "", 100);
-    if (cLabel) countrySet.add(cLabel);
-    const cat = toSafeText(ev.category, "Unknown", 80);
-    categories[cat] = (categories[cat] || 0) + 1;
-    if (Number(ev.anomaly_score) >= 80) {
-      highAnomalyCount += 1;
-    }
+    if (Number(ev.anomaly_score) >= 80) highAnomalyCount += 1;
   });
 
   return {
     totalAttacks: observedTimeline.length,
     uniqueIps: ipSet.size,
-    uniqueCountries: countrySet.size,
     highAnomalyCount,
-    categories,
   };
 }
 
@@ -957,45 +527,21 @@ function applyDashboardData(data) {
   latestData = data;
   if (!document.getElementById("kpi-total")) return;
 
-  const modeBadge = document.getElementById("mode-badge");
-  if (modeBadge) {
-    if (data.is_demo_mode) {
-      modeBadge.textContent = "DEMO FALLBACK";
-      modeBadge.className = "badge badge-warning";
-    } else {
-      modeBadge.textContent = "GCP LIVE";
-      modeBadge.className = "badge badge-success";
-    }
-  }
-
   const cost = data.cost && typeof data.cost === "object" ? data.cost : {};
   const derived = computeDerivedStats(data);
-
   const estUsd = Number(cost.estimated_monthly_usd) || 0;
-  const estJpy = Number(cost.estimated_monthly_jpy) || 0;
-  const quotaPct = Number(cost.logging_free_tier_pct) || 0;
 
   document.getElementById("kpi-total").textContent = derived.totalAttacks.toLocaleString();
   document.getElementById("kpi-ips").textContent = derived.uniqueIps.toLocaleString();
-  document.getElementById("kpi-countries-sub").textContent =
-    I18N[currentLang].countries_observed(derived.uniqueCountries);
   document.getElementById("kpi-anomaly").textContent = derived.highAnomalyCount.toLocaleString();
-  document.getElementById("kpi-cost").textContent =
-    `$${estUsd.toFixed(2)} (¥${Math.round(estJpy).toLocaleString()})`;
-  document.getElementById("kpi-quota").textContent =
-    I18N[currentLang].quota_label(quotaPct);
+  document.getElementById("kpi-cost").textContent = `$${estUsd.toFixed(2)}`;
 
   syncExportLinks();
-  renderCountryFlagsList(data.top_countries, data.timeline);
-  renderRightAnalytics(data.right_analytics);
-  updateCategoryChart(derived.categories);
-  scheduleRenderTables(data);
+  scheduleRenderTimeline(data);
 
   const lastUpdated = document.getElementById("last-updated");
   if (lastUpdated) {
-    const nowStr = new Date().toLocaleTimeString(
-      currentLang === "en" ? "en-US" : "ja-JP"
-    );
+    const nowStr = new Date().toLocaleTimeString(currentLang === "en" ? "en-US" : "ja-JP");
     lastUpdated.textContent = I18N[currentLang].updated_label(nowStr);
   }
 }
@@ -1019,13 +565,6 @@ async function fetchOnce() {
   }
 }
 
-function triggerExportDownload(endpoint, fallbackFilename) {
-  const hours = getValidatedHours();
-  const limit = getClampedLimit();
-  const url = `${endpoint}?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`;
-  window.location.assign(url || fallbackFilename);
-}
-
 function clearReconnectTimer() {
   if (reconnectTimerId !== null) {
     clearTimeout(reconnectTimerId);
@@ -1043,9 +582,7 @@ function scheduleReconnect() {
   reconnectAttempt += 1;
   reconnectTimerId = setTimeout(() => {
     reconnectTimerId = null;
-    if (!isStreamPaused) {
-      connectStream();
-    }
+    if (!isStreamPaused) connectStream();
   }, delay);
 }
 
@@ -1059,11 +596,6 @@ function connectStream() {
   const streamBadge = document.getElementById("stream-badge");
   const liveDot = document.getElementById("live-dot");
 
-  if (streamBadge) {
-    streamBadge.textContent = "SSE CONNECTING";
-    streamBadge.className = "badge badge-info";
-  }
-
   const source = new EventSource(
     `/api/stream?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`
   );
@@ -1073,7 +605,7 @@ function connectStream() {
     if (isStreamPaused || eventSource !== source) return;
     reconnectAttempt = 0;
     if (streamBadge) {
-      streamBadge.textContent = "SSE LIVE";
+      streamBadge.textContent = "LIVE";
       streamBadge.className = "badge badge-success";
     }
     if (liveDot) liveDot.classList.remove("paused");
@@ -1093,9 +625,7 @@ function connectStream() {
     source.close();
     eventSource = null;
     reconnectAttempt = 0;
-    if (!isStreamPaused) {
-      scheduleReconnect();
-    }
+    if (!isStreamPaused) scheduleReconnect();
   });
 
   source.onerror = () => {
@@ -1103,7 +633,7 @@ function connectStream() {
     source.close();
     eventSource = null;
     if (streamBadge) {
-      streamBadge.textContent = "RECONNECTING";
+      streamBadge.textContent = "RETRY";
       streamBadge.className = "badge badge-warning";
     }
     if (liveDot) liveDot.classList.add("paused");
@@ -1137,30 +667,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshBtn = document.getElementById("refresh-btn");
     if (refreshBtn) refreshBtn.addEventListener("click", fetchOnce);
 
-    const exportIpsBtn = document.getElementById("export-ips-btn");
-    if (exportIpsBtn && exportIpsBtn.tagName === "BUTTON") {
-      exportIpsBtn.addEventListener("click", () => {
-        triggerExportDownload("/api/export/ips.txt", `detected_ips_${getValidatedHours()}h.txt`);
-      });
-    }
-
-    const exportJsonlBtn = document.getElementById("export-jsonl-btn");
-    if (exportJsonlBtn && exportJsonlBtn.tagName === "BUTTON") {
-      exportJsonlBtn.addEventListener("click", () => {
-        triggerExportDownload("/api/export/attacks.jsonl", `detected_attacks_${getValidatedHours()}h.jsonl`);
-      });
-    }
-
     const hoursSelect = document.getElementById("hours-select");
     if (hoursSelect) {
       hoursSelect.addEventListener("change", () => {
         syncExportLinks();
         seenEventIds.clear();
-        if (isStreamPaused) {
-          fetchOnce();
-        } else {
-          connectStream();
-        }
+        if (isStreamPaused) fetchOnce();
+        else connectStream();
       });
     }
 
@@ -1169,11 +682,8 @@ document.addEventListener("DOMContentLoaded", () => {
       limitSelect.addEventListener("change", () => {
         syncExportLinks();
         seenEventIds.clear();
-        if (isStreamPaused) {
-          fetchOnce();
-        } else {
-          connectStream();
-        }
+        if (isStreamPaused) fetchOnce();
+        else connectStream();
       });
     }
 
@@ -1206,14 +716,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (searchInput) {
       searchInput.addEventListener("input", (e) => {
         searchQuery = sanitizeText(e.target.value || "", "", 200);
-        if (latestData) scheduleRenderTables(latestData);
+        if (latestData) scheduleRenderTimeline(latestData);
       });
     }
 
     if (clearBtn) {
-      clearBtn.addEventListener("click", () => {
-        applySearchFilter("");
-      });
+      clearBtn.addEventListener("click", () => applySearchFilter(""));
     }
 
     window.addEventListener("beforeunload", disconnectStream);
