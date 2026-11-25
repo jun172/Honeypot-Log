@@ -152,8 +152,8 @@ UNSUPERVISED_CLUSTERS = _env_int("UNSUPERVISED_CLUSTERS", 0)
 MAX_UNSUPERVISED_CLUSTERS = _env_int("MAX_UNSUPERVISED_CLUSTERS", 8, min_val=2, max_val=20)
 
 # Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: 80%以上を表示）
-HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", False)
-ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 0, min_val=0, max_val=100)
+HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", True)
+ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 80, min_val=0, max_val=100)
 
 # 監査ログ・運用者操作の除外設定（既定: 除外する）
 EXCLUDE_AUDIT_AND_ADMIN_LOGS = _env_bool("EXCLUDE_AUDIT_AND_ADMIN_LOGS", True)
