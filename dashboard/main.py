@@ -152,8 +152,8 @@ UNSUPERVISED_CLUSTERS = _env_int("UNSUPERVISED_CLUSTERS", 0)
 MAX_UNSUPERVISED_CLUSTERS = _env_int("MAX_UNSUPERVISED_CLUSTERS", 8, min_val=2, max_val=20)
 
 # Automated Recon / Scanner 非表示・異常イベント絞り込み設定（既定: 80%以上を表示）
-HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", True)
-ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 80, min_val=0, max_val=100)
+HIDE_AUTOMATED_RECON = _env_bool("HIDE_AUTOMATED_RECON", False)
+ANOMALY_SCORE_THRESHOLD = _env_int("ANOMALY_SCORE_THRESHOLD", 0, min_val=0, max_val=100)
 
 # 監査ログ・運用者操作の除外設定（既定: 除外する）
 EXCLUDE_AUDIT_AND_ADMIN_LOGS = _env_bool("EXCLUDE_AUDIT_AND_ADMIN_LOGS", True)
@@ -1920,17 +1920,22 @@ def _record_dedup_key(rec: dict[str, Any]) -> str:
     return f"ts:{rec.get('timestamp')}|ip:{rec.get('ip')}|m:{rec.get('method')}|p:{rec.get('path')}|h:{payload_digest}"
 
 
-def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
+def _fetch_all_entries_sync(
+    hours: int,
+    limit: int,
+    source_mode: str | None = None,
+) -> list[dict[str, Any]]:
     effective_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     now_dt = datetime.now(timezone.utc)
     cutoff_dt = None if _is_unbounded_history(hours) else (now_dt - timedelta(hours=hours))
+    mode = (source_mode or LOG_SOURCE_MODE or "all").strip().lower()
     combined: list[dict[str, Any]] = []
 
-    if LOG_SOURCE_MODE in {"all", "both", "logging"}:
+    if mode in {"all", "both", "logging"}:
         combined.extend(_fetch_cloud_logging_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
-    if LOG_SOURCE_MODE in {"all", "both", "gcs"}:
+    if mode in {"all", "both", "gcs"}:
         combined.extend(_fetch_gcs_entries_sync(now_dt=now_dt, cutoff_dt=cutoff_dt, limit=effective_limit))
-    if ENABLE_BIGQUERY_LOGS and LOG_SOURCE_MODE in {"all", "bigquery"}:
+    if ENABLE_BIGQUERY_LOGS and mode in {"all", "bigquery"}:
         combined.extend(_fetch_bigquery_entries_sync(cutoff_dt=cutoff_dt, limit=effective_limit))
 
     deduped: dict[str, dict[str, Any]] = {}
@@ -1941,9 +1946,13 @@ def _fetch_all_entries_sync(hours: int, limit: int) -> list[dict[str, Any]]:
     return sorted(deduped.values(), key=lambda r: r["timestamp"], reverse=True)[:effective_limit]
 
 
-async def fetch_logs_async(hours: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
+async def fetch_logs_async(
+    hours: int,
+    limit: int,
+    source_mode: str | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
     try:
-        records = await asyncio.to_thread(_fetch_all_entries_sync, hours, limit)
+        records = await asyncio.to_thread(_fetch_all_entries_sync, hours, limit, source_mode)
         return records, False
     except Exception as exc:
         logger.warning("Failed to fetch real logs: %s", exc)
@@ -2061,13 +2070,19 @@ def _compute_right_side_analytics(
     }
 
 
-async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
+async def build_stats_payload(
+    hours: int,
+    limit: int,
+    source_mode: str | None = None,
+) -> dict[str, Any]:
     effective_hours = min(max(int(hours), 1), MAX_QUERY_HOURS)
     effective_limit = min(max(int(limit), 1), MAX_ALLOWED_LIMIT)
+    effective_mode = (source_mode or LOG_SOURCE_MODE or "all").strip().lower()
     cache_key = (
         SHOW_ALL_HISTORY,
         effective_hours,
         effective_limit,
+        effective_mode,
         tuple(LOG_PROJECTS),
         tuple(LOG_GCS_BUCKETS),
         BQ_TABLE_ID,
@@ -2100,7 +2115,11 @@ async def build_stats_payload(hours: int, limit: int) -> dict[str, Any]:
             _save_ips_txt_if_enabled(collect_detected_ips(cached_payload))
             return cached_payload
 
-    raw_records, is_demo_mode = await fetch_logs_async(hours=effective_hours, limit=effective_limit)
+    raw_records, is_demo_mode = await fetch_logs_async(
+        hours=effective_hours,
+        limit=effective_limit,
+        source_mode=effective_mode,
+    )
     geo_map = await resolve_geoip_batch([r["ip"] for r in raw_records])
 
     anomalous_items: list[tuple[dict[str, Any], dict[str, Any], str, str, float, int, dict[str, Any]]] = []
@@ -2438,21 +2457,67 @@ async def get_stats(
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     return await build_stats_payload(hours=safe_hours, limit=safe_limit)
 
-
-@app.get("/api/export/ips.txt")
-async def export_ips_txt(
+@app.get("/api/export/log.txt")
+async def export_log_txt(
     hours: int = Query(default=8760, ge=1, le=87600),
     limit: int = Query(default=10000, ge=1, le=50000),
+) -> Response:
+    """1年分（既定8760時間）の異常度80以上ログをプレーンテキスト（log.txt）で配信する。"""
+    safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
+    safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
+    payload = await build_stats_payload(hours=safe_hours, limit=safe_limit)
+    timeline = payload.get("timeline") if isinstance(payload, dict) else []
+
+    lines: list[str] = []
+    if isinstance(timeline, list):
+        for ev in timeline:
+            if not isinstance(ev, dict):
+                continue
+            ts = str(ev.get("timestamp") or "")
+            ip = str(ev.get("ip") or "")
+            country = str(ev.get("country") or "")
+            isp = str(ev.get("isp") or "")
+            cat = str(ev.get("category") or "")
+            cluster = str(ev.get("cluster_label") or "")
+            score = ev.get("anomaly_score")
+            method = str(ev.get("method") or "")
+            path_str = str(ev.get("path") or "")
+            summary = str(ev.get("attack_summary") or ev.get("attack_summary_en") or "")
+            detail = str(ev.get("payload_full") or ev.get("payload") or "")
+            line = (
+                f"[{ts}] ip={ip} country={country} isp={isp} "
+                f"category={cat} cluster={cluster} anomaly={score}% "
+                f"req={method} {path_str} summary={summary} payload={detail}"
+            )
+            lines.append(line.replace("\r", " ").replace("\n", " "))
+
+    body = "\n".join(lines) + ("\n" if lines else "")
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="log.txt"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+@app.get("/api/export/attacks.jsonl")
+async def export_attacks_jsonl(
+    hours: int = Query(default=8760, ge=1, le=87600),
+    limit: int = Query(default=2000, ge=1, le=50000),
 ) -> Response:
     safe_hours = min(max(hours, 1), MAX_QUERY_HOURS)
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     payload = await build_stats_payload(hours=safe_hours, limit=safe_limit)
-    ips = collect_detected_ips(payload)
-    txt_body = "\n".join(ips) + ("\n" if ips else "")
-    filename = f"detected_ips_{safe_hours}h.txt"
+    events = payload.get("timeline") or []
+    jsonl_body = (
+        "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in events)
+        + ("\n" if events else "")
+    )
+    filename = f"detected_attacks_{safe_hours}h.jsonl"
     return Response(
-        content=txt_body.encode("utf-8"),
-        media_type="text/plain; charset=utf-8",
+        content=jsonl_body.encode("utf-8"),
+        media_type="application/x-ndjson; charset=utf-8",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-cache",
@@ -2506,6 +2571,35 @@ async def stream_stats(
 async def serve_environment() -> FileResponse:
     return FileResponse(_resolve_static_file("environment.html"))
 
+def _build_full_export_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """省略（…）なしの完全なログ情報・AI解説・元JSONを含むイベント一覧を作成する。"""
+    events = payload.get("timeline")
+    if not isinstance(events, list):
+        return []
+
+    full_events: list[dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        raw_json_obj = ev.get("raw_json")
+        raw_json_full_str = (
+            _safe_json_dumps(raw_json_obj, indent=None)
+            if raw_json_obj is not None
+            else str(ev.get("payload_full") or ev.get("payload") or "")
+        )
+        raw_json_pretty_str = (
+            _safe_json_dumps(raw_json_obj, indent=2)
+            if raw_json_obj is not None
+            else str(ev.get("raw_json_pretty_full") or ev.get("raw_json_pretty") or "")
+        )
+        full_item = dict(ev)
+        full_item["payload_full"] = str(ev.get("payload_full") or ev.get("payload") or "")
+        full_item["raw_json_full_str"] = raw_json_full_str
+        full_item["raw_json_pretty_full"] = raw_json_pretty_str
+        full_events.append(full_item)
+    return full_events
+
+
 def fetch_attacks_from_gcp(
     hours: int = 8760,
     limit: int = 10000,
@@ -2514,34 +2608,46 @@ def fetch_attacks_from_gcp(
     out_attacks: Path | None = None,
 ) -> dict[str, Any]:
     """Cloud Logging / GCS / BigQuery から攻撃ログを取得・分析し、IPと攻撃データを保存する。"""
-    global LOG_SOURCE_MODE
+    global LOG_SOURCE_MODE, MAX_DISPLAY_TEXT_LEN
     prev_mode = LOG_SOURCE_MODE
+    prev_display_len = MAX_DISPLAY_TEXT_LEN
     if source_mode:
         LOG_SOURCE_MODE = source_mode.strip().lower()
+    # 保存処理中は文字列切り詰めを無効化して全文を保持する
+    MAX_DISPLAY_TEXT_LEN = 0
     try:
         init_ml_models()
         payload = asyncio.run(build_stats_payload(hours=hours, limit=limit))
     finally:
         LOG_SOURCE_MODE = prev_mode
+        MAX_DISPLAY_TEXT_LEN = prev_display_len
 
     ips = collect_detected_ips(payload)
     target_ips_path = out_ips or IPS_TXT_PATH
     target_ips_path.parent.mkdir(parents=True, exist_ok=True)
     target_ips_path.write_text("\n".join(ips) + ("\n" if ips else ""), encoding="utf-8")
 
+    full_events = _build_full_export_events(payload)
     if out_attacks is not None:
         out_attacks.parent.mkdir(parents=True, exist_ok=True)
-        events = payload.get("timeline") or []
-        out_attacks.write_text(
-            "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in events)
-            + ("\n" if events else ""),
-            encoding="utf-8",
-        )
+        if out_attacks.suffix.lower() == ".json":
+            out_attacks.write_text(
+                json.dumps(full_events, ensure_ascii=False, default=str, indent=2)
+                + ("\n" if full_events else ""),
+                encoding="utf-8",
+            )
+        else:
+            out_attacks.write_text(
+                "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in full_events)
+                + ("\n" if full_events else ""),
+                encoding="utf-8",
+            )
 
     return {
         "ips": ips,
         "ips_path": str(target_ips_path),
         "attacks_path": str(out_attacks) if out_attacks else None,
+        "events": full_events,
         "payload": payload,
     }
 
@@ -2570,8 +2676,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out-attacks",
         type=str,
-        default="detected_attacks.jsonl",
-        help="抽出した攻撃ログを保存する .jsonl ファイルパス（空文字で保存しない）",
+        default="log.json",
+        help="抽出した攻撃ログを保存する .json / .jsonl ファイルパス（空文字で保存しない）",
     )
     args = parser.parse_args()
 
@@ -2589,9 +2695,9 @@ if __name__ == "__main__":
     print(f"ユニーク攻撃元IP数: {len(result['ips'])} 件 -> {result['ips_path']}")
     if result["attacks_path"]:
         print(f"攻撃ログ保存先: {result['attacks_path']}")
-    for ev in (pl.get("timeline") or [])[:10]:
+    for ev in (result.get("events") or [])[:10]:
         print(
             f"  [{ev.get('timestamp')}] {ev.get('flag', '')} {ev.get('country', '')} "
             f"{ev.get('ip')} | {ev.get('category')} ({ev.get('anomaly_score')}%) | "
-            f"{ev.get('method')} {ev.get('path')}"
+            f"{ev.get('method')} {ev.get('path')} | {ev.get('attack_summary')}"
         )

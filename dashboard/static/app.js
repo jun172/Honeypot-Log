@@ -8,7 +8,8 @@ let renderRafId = null;
 
 const EXCLUDE_GOOGLE_AND_PRIVATE = true;
 const MAX_SEEN_EVENT_IDS = 100000;
-const ALLOWED_HOURS = new Set([6, 24, 72, 168, 8760]);
+const ALLOWED_HOURS = new Set([1, 6, 12, 24, 72, 168, 720, 8760]);
+const ALLOWED_LIMITS = new Set([200, 500, 1000, 2000, 5000, 10000]);
 const DEFAULT_LIMIT = 2000;
 const MAX_LIMIT = 10000;
 const RECONNECT_BASE_DELAY_MS = 3000;
@@ -48,14 +49,26 @@ const I18N = {
     nav_env: "開発環境・構成",
     back_to_dash: "← ダッシュボードへ戻る",
     period_label: "集計期間:",
+    period_1h: "直近 1時間",
     period_6h: "直近 6時間",
+    period_12h: "直近 12時間",
     period_24h: "直近 24時間",
     period_72h: "直近 3日間",
     period_168h: "直近 7日間",
+    period_30d: "直近 30日間",
     period_all: "全期間 (All)",
+    limit_label: "件数上限:",
+    limit_200: "200件",
+    limit_500: "500件",
+    limit_1000: "1,000件",
+    limit_2000: "2,000件",
+    limit_5000: "5,000件",
+    limit_10000: "10,000件",
     pause_btn: "一時停止",
     resume_btn: "再開",
     refresh_btn: "即時取得",
+    export_ips_btn: "IP .txt 保存",
+    export_jsonl_btn: "攻撃ログ .jsonl 保存",
     connecting: "ストリーム接続中...",
     fetch_error: "取得エラー",
     kpi_total: "総検知イベント数 (異常度≥80%)",
@@ -108,14 +121,26 @@ const I18N = {
     nav_env: "Dev Env & Stack",
     back_to_dash: "← Back to Dashboard",
     period_label: "Window:",
+    period_1h: "Last 1 Hour",
     period_6h: "Last 6 Hours",
+    period_12h: "Last 12 Hours",
     period_24h: "Last 24 Hours",
     period_72h: "Last 3 Days",
     period_168h: "Last 7 Days",
+    period_30d: "Last 30 Days",
     period_all: "All History",
+    limit_label: "Limit:",
+    limit_200: "200 rows",
+    limit_500: "500 rows",
+    limit_1000: "1,000 rows",
+    limit_2000: "2,000 rows",
+    limit_5000: "5,000 rows",
+    limit_10000: "10,000 rows",
     pause_btn: "Pause",
     resume_btn: "Resume",
     refresh_btn: "Refresh Now",
+    export_ips_btn: "Save IP .txt",
+    export_jsonl_btn: "Save Logs .jsonl",
     connecting: "Connecting stream...",
     fetch_error: "Fetch error",
     kpi_total: "Total Detected Events (≥80%)",
@@ -188,6 +213,42 @@ function getValidatedHours() {
   if (!hoursEl) return 8760;
   const parsed = Number(hoursEl.value);
   return ALLOWED_HOURS.has(parsed) ? parsed : 8760;
+}
+
+function getClampedLimit(rawLimit = null) {
+  if (rawLimit !== null && rawLimit !== undefined) {
+    const num = Number(rawLimit);
+    if (!Number.isFinite(num)) return DEFAULT_LIMIT;
+    return Math.max(1, Math.min(MAX_LIMIT, Math.round(num)));
+  }
+  const limitEl = document.getElementById("limit-select");
+  if (!limitEl) return DEFAULT_LIMIT;
+  const parsed = Number(limitEl.value);
+  if (ALLOWED_LIMITS.has(parsed)) return parsed;
+  if (!Number.isFinite(parsed)) return DEFAULT_LIMIT;
+  return Math.max(1, Math.min(MAX_LIMIT, Math.round(parsed)));
+}
+
+function syncExportLinks() {
+  const hours = getValidatedHours();
+  const limit = getClampedLimit();
+  const query = `hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`;
+
+  const ipsLink =
+    document.getElementById("export-ips-link") ||
+    document.getElementById("export-ips-btn");
+  if (ipsLink) {
+    ipsLink.setAttribute("href", `/api/export/ips.txt?${query}`);
+    ipsLink.setAttribute("download", `detected_ips_${hours}h.txt`);
+  }
+
+  const jsonlLink =
+    document.getElementById("export-jsonl-link") ||
+    document.getElementById("export-jsonl-btn");
+  if (jsonlLink) {
+    jsonlLink.setAttribute("href", `/api/export/attacks.jsonl?${query}`);
+    jsonlLink.setAttribute("download", `detected_attacks_${hours}h.jsonl`);
+  }
 }
 
 function createTextEl(tagName, text, className = "") {
@@ -694,7 +755,7 @@ function renderIpTable(topIps) {
   if (!ipBody) return;
 
   const items = (Array.isArray(topIps) ? topIps : []).filter(
-    (item) => item && typeof item !== "object" && !isGoogleOrPrivateEntry(item)
+    (item) => item && typeof item === "object" && !isGoogleOrPrivateEntry(item)
   );
 
   const fragment = document.createDocumentFragment();
@@ -924,6 +985,7 @@ function applyDashboardData(data) {
   document.getElementById("kpi-quota").textContent =
     I18N[currentLang].quota_label(quotaPct);
 
+  syncExportLinks();
   renderCountryFlagsList(data.top_countries, data.timeline);
   renderRightAnalytics(data.right_analytics);
   updateCategoryChart(derived.categories);
@@ -938,15 +1000,10 @@ function applyDashboardData(data) {
   }
 }
 
-function getClampedLimit(rawLimit = DEFAULT_LIMIT) {
-  const num = Number(rawLimit);
-  if (!Number.isFinite(num)) return DEFAULT_LIMIT;
-  return Math.max(1, Math.min(MAX_LIMIT, Math.round(num)));
-}
-
 async function fetchOnce() {
+  syncExportLinks();
   const hours = getValidatedHours();
-  const limit = getClampedLimit(DEFAULT_LIMIT);
+  const limit = getClampedLimit();
   try {
     const res = await fetch(
       `/api/stats?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`,
@@ -960,6 +1017,13 @@ async function fetchOnce() {
     const lastUpdated = document.getElementById("last-updated");
     if (lastUpdated) lastUpdated.textContent = t("fetch_error");
   }
+}
+
+function triggerExportDownload(endpoint, fallbackFilename) {
+  const hours = getValidatedHours();
+  const limit = getClampedLimit();
+  const url = `${endpoint}?hours=${encodeURIComponent(hours)}&limit=${encodeURIComponent(limit)}`;
+  window.location.assign(url || fallbackFilename);
 }
 
 function clearReconnectTimer() {
@@ -987,10 +1051,11 @@ function scheduleReconnect() {
 
 function connectStream() {
   disconnectStream();
+  syncExportLinks();
   if (isStreamPaused) return;
 
   const hours = getValidatedHours();
-  const limit = getClampedLimit(DEFAULT_LIMIT);
+  const limit = getClampedLimit();
   const streamBadge = document.getElementById("stream-badge");
   const liveDot = document.getElementById("live-dot");
 
@@ -1061,6 +1126,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (enBtn) enBtn.addEventListener("click", () => applyLanguage("en"));
 
   applyLanguage(currentLang);
+  syncExportLinks();
 
   if (
     document.getElementById("country-flags-list") ||
@@ -1071,9 +1137,37 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshBtn = document.getElementById("refresh-btn");
     if (refreshBtn) refreshBtn.addEventListener("click", fetchOnce);
 
+    const exportIpsBtn = document.getElementById("export-ips-btn");
+    if (exportIpsBtn && exportIpsBtn.tagName === "BUTTON") {
+      exportIpsBtn.addEventListener("click", () => {
+        triggerExportDownload("/api/export/ips.txt", `detected_ips_${getValidatedHours()}h.txt`);
+      });
+    }
+
+    const exportJsonlBtn = document.getElementById("export-jsonl-btn");
+    if (exportJsonlBtn && exportJsonlBtn.tagName === "BUTTON") {
+      exportJsonlBtn.addEventListener("click", () => {
+        triggerExportDownload("/api/export/attacks.jsonl", `detected_attacks_${getValidatedHours()}h.jsonl`);
+      });
+    }
+
     const hoursSelect = document.getElementById("hours-select");
     if (hoursSelect) {
       hoursSelect.addEventListener("change", () => {
+        syncExportLinks();
+        seenEventIds.clear();
+        if (isStreamPaused) {
+          fetchOnce();
+        } else {
+          connectStream();
+        }
+      });
+    }
+
+    const limitSelect = document.getElementById("limit-select");
+    if (limitSelect) {
+      limitSelect.addEventListener("change", () => {
+        syncExportLinks();
         seenEventIds.clear();
         if (isStreamPaused) {
           fetchOnce();

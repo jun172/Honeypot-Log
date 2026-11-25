@@ -12,7 +12,9 @@
   --purple: #a855f7;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -34,6 +36,7 @@ body {
   margin: -1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -62,6 +65,7 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .brand h1 {
@@ -72,6 +76,7 @@ body {
 
 .nav-links {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-left: 6px;
@@ -79,13 +84,18 @@ body {
 
 .nav-link,
 .back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
   color: var(--text-muted);
   text-decoration: none;
   font-size: 0.82rem;
   padding: 5px 10px;
   border-radius: 7px;
   border: 1px solid transparent;
-  transition: all 0.15s ease;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .nav-link:hover,
@@ -118,6 +128,11 @@ body {
   min-height: 34px;
   background: transparent;
   color: var(--text-muted);
+}
+
+.lang-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-card-hover);
 }
 
 .lang-btn.active {
@@ -159,6 +174,7 @@ body {
   align-items: center;
   gap: 8px;
   font-size: 0.875rem;
+  min-width: 0;
 }
 
 select,
@@ -174,7 +190,8 @@ button {
   transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 }
 
-button:hover {
+button:hover,
+select:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -230,7 +247,7 @@ button:hover {
 
 .arch-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -239,6 +256,7 @@ button:hover {
   border: 1px solid var(--border-color);
   border-radius: 10px;
   padding: 14px;
+  min-width: 0;
 }
 
 .arch-box h3 {
@@ -280,6 +298,7 @@ button:hover {
   border-radius: 8px;
   background-color: var(--bg-main);
   border: 1px solid var(--border-color);
+  color: var(--text-primary);
   font-size: 0.82rem;
 }
 
@@ -321,6 +340,7 @@ button:hover {
   gap: 8px;
   flex: 1 1 420px;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 #ip-search-input {
@@ -333,6 +353,7 @@ button:hover {
   min-width: 240px;
   flex: 1 1 240px;
   min-height: 36px;
+  transition: border-color 0.15s ease;
 }
 
 #ip-search-input:focus {
@@ -350,7 +371,7 @@ button:hover {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -363,6 +384,8 @@ button:hover {
   font-size: 1.8rem;
   font-weight: 700;
   margin: 4px 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -381,8 +404,13 @@ button:hover {
 
 .main-grid {
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
   gap: 14px;
+}
+
+#attack-map,
+.map-card .country-flags-list {
+  min-height: 280px;
 }
 
 #attack-map {
@@ -393,7 +421,9 @@ button:hover {
 }
 
 .chart-wrapper {
+  position: relative;
   height: 360px;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -401,11 +431,12 @@ button:hover {
 
 .ranking-grid {
   display: grid;
-  grid-template-columns: 1fr 1.5fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
   gap: 14px;
 }
 
 .table-wrap {
+  width: 100%;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -512,14 +543,29 @@ code {
   border: 1px solid rgba(16, 185, 129, 0.4);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot,
+  tr.new-event-row {
+    animation: none;
+  }
+
+  .nav-link,
+  .back-link,
+  select,
+  button,
+  #ip-search-input {
+    transition: none;
+  }
+}
+
 @media (max-width: 1024px) {
   .kpi-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .main-grid,
   .ranking-grid,
   .arch-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -547,7 +593,7 @@ code {
     border-radius: 10px;
   }
   .kpi-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
   .kpi-value {
@@ -585,6 +631,6 @@ code {
 
 @media (max-width: 380px) {
   .kpi-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
