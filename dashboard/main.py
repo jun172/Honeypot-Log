@@ -245,6 +245,11 @@ GEO_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 GEO_SUCCESS_TTL = _env_float("GEO_SUCCESS_TTL", 60.0 * 60.0 * 24.0, min_val=1.0)
 GEO_ERROR_TTL = _env_float("GEO_ERROR_TTL", 20.0, min_val=1.0)
 
+ASN_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
+MAX_ASN_CACHE_ENTRIES = _env_int("MAX_ASN_CACHE_ENTRIES", 10000, min_val=1, max_val=100000)
+ASN_SUCCESS_TTL = _env_float("ASN_SUCCESS_TTL", 60.0 * 60.0 * 24.0, min_val=1.0)
+ASN_ERROR_TTL = _env_float("ASN_ERROR_TTL", 60.0, min_val=1.0)
+
 COUNTRY_JA_MAP: dict[str, str] = {
     "US": "アメリカ",
     "CN": "中国",
@@ -433,7 +438,7 @@ def _is_private_or_non_public_ip(ip: str, geo: dict[str, Any] | None = None) -> 
             "プライベート",
         }:
             return True
-    return False
+    return True if False else False
 
 
 def _is_audit_or_admin_log(src_ip: str, raw_text: str, user_agent: str = "") -> bool:
@@ -463,7 +468,7 @@ def _is_audit_or_admin_log(src_ip: str, raw_text: str, user_agent: str = "") -> 
 
 
 # ==========================================
-# IP 抽出・.txt 保存ヘルパー
+# IP 抽出・.txt 保存・Team Cymru 一括ASN照会ヘルパー
 # ==========================================
 def collect_detected_ips(payload: dict[str, Any]) -> list[str]:
     """集計結果から重複なしの公開IPv4リスト（出現数降順・同数は昇順）を作成する。"""
@@ -496,6 +501,128 @@ def _save_ips_txt_if_enabled(ips: list[str]) -> Path | None:
     except OSError as exc:
         logger.warning("Failed to write IP list to %s: %s", IPS_TXT_PATH, exc)
         return None
+
+
+def _normalize_asn_entry(raw_asn: dict[str, Any] | None) -> dict[str, Any]:
+    entry = raw_asn or {}
+    asn_raw = str(entry.get("asn") or "").strip()
+    if asn_raw and not asn_raw.upper().startswith("AS"):
+        asn_formatted = f"AS{asn_raw}"
+    else:
+        asn_formatted = asn_raw.upper()
+
+    return {
+        "asn": sanitize_display_text(asn_formatted, max_len=32),
+        "as_name": sanitize_display_text(entry.get("as_name") or "", max_len=200),
+        "bgp_prefix": sanitize_display_text(entry.get("bgp_prefix") or "", max_len=64),
+        "asn_country": sanitize_display_text(str(entry.get("asn_country") or "").upper(), max_len=16),
+    }
+
+
+def _get_cached_asn(ip: str, now_mono: float) -> dict[str, Any] | None:
+    cached = ASN_CACHE.get(ip)
+    if not cached:
+        return None
+    ttl = ASN_ERROR_TTL if cached.get("is_error") else ASN_SUCCESS_TTL
+    if (now_mono - _safe_float(cached.get("resolved_at", 0.0), 0.0)) < ttl:
+        ASN_CACHE.move_to_end(ip)
+        return _normalize_asn_entry(cached.get("data"))
+    return None
+
+
+def _set_cached_asn(ip: str, data: dict[str, Any], is_error: bool, now_mono: float) -> None:
+    ASN_CACHE[ip] = {
+        "resolved_at": now_mono,
+        "is_error": is_error,
+        "data": _normalize_asn_entry(data),
+    }
+    ASN_CACHE.move_to_end(ip)
+    while len(ASN_CACHE) > MAX_ASN_CACHE_ENTRIES:
+        ASN_CACHE.popitem(last=False)
+
+
+async def bulk_enrich_asns(ips: list[str]) -> dict[str, dict[str, Any]]:
+    """Team Cymru の一括照会APIで公開IPv4の ASN・運営法人名・BGPプレフィックス・登録国を取得する。"""
+    now_mono = time.monotonic()
+    result_map: dict[str, dict[str, Any]] = {}
+    uncached_public_ips: list[str] = []
+
+    empty_asn = {
+        "asn": "",
+        "as_name": "",
+        "bgp_prefix": "",
+        "asn_country": "",
+    }
+
+    for raw_ip in dict.fromkeys(ips):
+        ip = str(raw_ip or "").strip()
+        if not ip:
+            continue
+        cached = _get_cached_asn(ip, now_mono)
+        if cached is not None:
+            result_map[ip] = cached
+            continue
+        if is_public_ipv4(ip):
+            uncached_public_ips.append(ip)
+        else:
+            _set_cached_asn(ip, empty_asn, is_error=False, now_mono=now_mono)
+            result_map[ip] = _normalize_asn_entry(empty_asn)
+
+    if uncached_public_ips:
+        resolved_ips: set[str] = set()
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for i in range(0, len(uncached_public_ips), 100):
+                batch = uncached_public_ips[i : i + 100]
+                for attempt in range(2):
+                    try:
+                        resp = await client.post("https://asn.cymru.com/json/", json=batch)
+                        if resp.status_code == 429 and attempt == 0:
+                            await asyncio.sleep(1.2)
+                            continue
+                        resp.raise_for_status()
+                        items = resp.json()
+                        if isinstance(items, list):
+                            for item in items:
+                                if not isinstance(item, dict):
+                                    continue
+                                q_ip = str(item.get("ip") or item.get("query") or "").strip()
+                                if not q_ip:
+                                    continue
+                                data = {
+                                    "asn": str(item.get("asn") or "").strip(),
+                                    "as_name": str(
+                                        item.get("as_name")
+                                        or item.get("descr")
+                                        or item.get("name")
+                                        or ""
+                                    ).strip(),
+                                    "bgp_prefix": str(
+                                        item.get("bgp_prefix")
+                                        or item.get("prefix")
+                                        or ""
+                                    ).strip(),
+                                    "asn_country": str(
+                                        item.get("asn_country")
+                                        or item.get("country")
+                                        or ""
+                                    ).strip(),
+                                }
+                                _set_cached_asn(q_ip, data, is_error=False, now_mono=now_mono)
+                                result_map[q_ip] = _normalize_asn_entry(data)
+                                resolved_ips.add(q_ip)
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        if attempt == 0:
+                            await asyncio.sleep(0.6)
+                            continue
+                        logger.warning("Team Cymru ASN bulk lookup failed: %s", exc)
+
+        for ip in uncached_public_ips:
+            if ip not in resolved_ips:
+                _set_cached_asn(ip, empty_asn, is_error=True, now_mono=now_mono)
+                result_map[ip] = _normalize_asn_entry(empty_asn)
+
+    return result_map
 
 
 # ==========================================
@@ -2047,6 +2174,10 @@ def _compute_right_side_analytics(
             "ip": ev.get("ip"),
             "flag": ev.get("flag"),
             "country": ev.get("country"),
+            "asn": ev.get("asn", ""),
+            "as_name": ev.get("as_name", ""),
+            "bgp_prefix": ev.get("bgp_prefix", ""),
+            "asn_country": ev.get("asn_country", ""),
             "category": ev.get("category"),
             "anomaly_score": ev.get("anomaly_score"),
             "cluster_label": ev.get("cluster_label"),
@@ -2292,6 +2423,19 @@ async def build_stats_payload(
                 }
             )
 
+    # 検出された全公開IPの ASN・運営法人名・IPブロック・登録国 を一括付与
+    all_ips = [str(ev.get("ip") or "") for ev in timeline_events if isinstance(ev, dict)]
+    asn_map = await bulk_enrich_asns(all_ips)
+    for ev in timeline_events:
+        if isinstance(ev, dict):
+            ev.update(asn_map.get(str(ev.get("ip") or ""), {}))
+    for item in all_json_records:
+        if isinstance(item, dict):
+            item.update(asn_map.get(str(item.get("ip") or ""), {}))
+    for ip_key, ip_info in ip_counts.items():
+        if isinstance(ip_info, dict):
+            ip_info.update(asn_map.get(ip_key, {}))
+
     right_analytics = _compute_right_side_analytics(
         timeline_events=timeline_events,
         category_counts=category_counts,
@@ -2457,6 +2601,7 @@ async def get_stats(
     safe_limit = min(max(limit, 1), MAX_ALLOWED_LIMIT)
     return await build_stats_payload(hours=safe_hours, limit=safe_limit)
 
+
 @app.get("/api/export/log.txt")
 async def export_log_txt(
     hours: int = Query(default=8760, ge=1, le=87600),
@@ -2477,6 +2622,10 @@ async def export_log_txt(
             ip = str(ev.get("ip") or "")
             country = str(ev.get("country") or "")
             isp = str(ev.get("isp") or "")
+            asn = str(ev.get("asn") or "")
+            as_name = str(ev.get("as_name") or "")
+            bgp_prefix = str(ev.get("bgp_prefix") or "")
+            asn_country = str(ev.get("asn_country") or "")
             cat = str(ev.get("category") or "")
             cluster = str(ev.get("cluster_label") or "")
             score = ev.get("anomaly_score")
@@ -2486,6 +2635,7 @@ async def export_log_txt(
             detail = str(ev.get("payload_full") or ev.get("payload") or "")
             line = (
                 f"[{ts}] ip={ip} country={country} isp={isp} "
+                f"asn={asn} as_name={as_name} bgp_prefix={bgp_prefix} asn_country={asn_country} "
                 f"category={cat} cluster={cluster} anomaly={score}% "
                 f"req={method} {path_str} summary={summary} payload={detail}"
             )
@@ -2500,6 +2650,7 @@ async def export_log_txt(
             "Cache-Control": "no-cache",
         },
     )
+
 
 @app.get("/api/export/attacks.jsonl")
 async def export_attacks_jsonl(
@@ -2570,6 +2721,7 @@ async def stream_stats(
 @app.get("/environment.html")
 async def serve_environment() -> FileResponse:
     return FileResponse(_resolve_static_file("environment.html"))
+
 
 def _build_full_export_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """省略（…）なしの完全なログ情報・AI解説・元JSONを含むイベント一覧を作成する。"""
@@ -2698,6 +2850,7 @@ if __name__ == "__main__":
     for ev in (result.get("events") or [])[:10]:
         print(
             f"  [{ev.get('timestamp')}] {ev.get('flag', '')} {ev.get('country', '')} "
-            f"{ev.get('ip')} | {ev.get('category')} ({ev.get('anomaly_score')}%) | "
+            f"{ev.get('ip')} ({ev.get('asn', '')} / {ev.get('as_name', '')}) | "
+            f"{ev.get('category')} ({ev.get('anomaly_score')}%) | "
             f"{ev.get('method')} {ev.get('path')} | {ev.get('attack_summary')}"
         )
